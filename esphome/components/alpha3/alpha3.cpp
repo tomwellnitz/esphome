@@ -22,17 +22,16 @@ void Alpha3::dump_config() {
 
 void Alpha3::setup() {}
 
-optional<float> Alpha3::extract_value_(const uint8_t *response, int16_t length, int16_t response_offset,
-                                       int16_t value_offset) {
-  // Handle cases where a value is split over two packets
-  const int16_t value_length = 4;  // 32bit float
+uint8_t *Alpha3::extract_value_(const uint8_t *response, int16_t length, int16_t response_offset, int16_t value_offset,
+                                const int16_t value_length) {
+  assert(value_length <= sizeof(this->buffer_));
   // offset inside current response packet
   auto rel_offset = value_offset - response_offset;
   if (rel_offset <= -value_length) {
-    return {};  // already passed the value completely
+    return nullptr;  // already passed the value completely
   }
   if (rel_offset >= length) {
-    return {};  // value not in this packet
+    return nullptr;  // value not in this packet
   }
 
   auto start_offset = std::max(0, rel_offset);
@@ -41,23 +40,35 @@ optional<float> Alpha3::extract_value_(const uint8_t *response, int16_t length, 
   auto buffer_offset = std::max(-rel_offset, 0);
   std::memcpy(this->buffer_ + buffer_offset, response + start_offset, copy_length);
 
-  if (rel_offset + value_length <= length) {
-    // we have the whole value
-    void *buffer = this->buffer_;                          // to prevent warnings when casting the pointer
-    *((int32_t *) buffer) = ntohl(*((int32_t *) buffer));  // values are big endian
-    return *((float *) buffer);
+  if (rel_offset + value_length > length) {
+    return nullptr;
   }
-  return {};
+  // we have the whole value
+  return this->buffer_;
 }
 
-void Alpha3::extract_publish_sensor_value_(const uint8_t *response, int16_t length, int16_t response_offset,
-                                           int16_t value_offset, sensor::Sensor *sensor, float factor) {
+void Alpha3::extract_publish_sensor_float_value_(const uint8_t *response, int16_t length, int16_t response_offset,
+                                                 int16_t value_offset, sensor::Sensor *sensor, float factor) {
   if (sensor == nullptr) {
     return;
   }
-  auto value = this->extract_value_(response, length, response_offset, value_offset);
-  if (value.has_value()) {
-    sensor->publish_state(value.value() * factor);
+  void *buffer = this->extract_value_(response, length, response_offset, value_offset, sizeof(float));
+  if (buffer) {
+    *((int32_t *) buffer) = ntohl(*((int32_t *) buffer));  // values are big endian
+    float fvalue = *((float *) buffer);
+    sensor->publish_state(fvalue * factor);
+  }
+}
+
+void Alpha3::extract_publish_sensor_mode_value_(const uint8_t *response, int16_t length, int16_t response_offset,
+                                                int16_t value_offset, text_sensor::TextSensor *sensor) {
+  if (sensor == nullptr) {
+    return;
+  }
+  uint8_t *value = this->extract_value_(response, length, response_offset, value_offset, sizeof(uint8_t));
+  if (value) {
+    const char *mode = this->get_mode_name_(*value);
+    sensor->publish_state(mode);
   }
 }
 
@@ -84,7 +95,7 @@ void Alpha3::handle_geni_response_(const uint8_t *response, uint16_t length) {
 
   auto extract_publish_sensor_value = [response, length, this](int16_t value_offset, sensor::Sensor *sensor,
                                                                float factor) {
-    this->extract_publish_sensor_value_(response, length, this->response_offset_, value_offset, sensor, factor);
+    this->extract_publish_sensor_float_value_(response, length, this->response_offset_, value_offset, sensor, factor);
   };
 
   if (this->is_current_response_type_(GENI_RESPONSE_TYPE_FLOW_HEAD)) {
@@ -99,13 +110,8 @@ void Alpha3::handle_geni_response_(const uint8_t *response, uint16_t length) {
     extract_publish_sensor_value(GENI_RESPONSE_VOLTAGE_AC_OFFSET, this->voltage_sensor_, 1.0F);
   } else if (this->is_current_response_type_(GENI_RESPONSE_TYPE_MODE)) {
     ESP_LOGD(TAG, "[%s] MODE Response", this->parent_->address_str());
-    // Mode is a single byte value at offset 0 after header
-    if (this->response_offset_ == -GENI_RESPONSE_HEADER_LENGTH && length > GENI_RESPONSE_HEADER_LENGTH) {
-      uint8_t mode_value = response[GENI_RESPONSE_HEADER_LENGTH + GENI_RESPONSE_MODE_OFFSET];
-      if (this->mode_text_sensor_ != nullptr) {
-        this->mode_text_sensor_->publish_state(this->get_mode_name_(mode_value));
-      }
-    }
+    this->extract_publish_sensor_mode_value_(response, length, this->response_offset_, GENI_RESPONSE_MODE_OFFSET,
+                                             this->mode_text_sensor_);
   } else {
     ESP_LOGW(TAG, "unknown GENI response Type %d %d %d %d %d %d %d %d", this->response_type_[0],
              this->response_type_[1], this->response_type_[2], this->response_type_[3], this->response_type_[4],
