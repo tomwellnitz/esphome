@@ -36,31 +36,31 @@ void GenibusBLE::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t g
     case ESP_GATTC_SEARCH_CMPL_EVT: {
       auto *chr = this->parent_->get_characteristic(GENI_SERVICE_UUID, GENI_CHARACTERISTIC_UUID);
       if (chr == nullptr) {
-        ESP_LOGE(TAG, "[%s] No GENI characteristic, not a GENIbus device", this->parent_->address_str());
+        this->link_fault_(LOG_STR("No GENI characteristic"));
         break;
       }
-      this->char_handle_ = chr->handle;
-      esp_err_t err = this->parent_->register_for_notify(chr->handle);
-      if (err != ESP_OK) {
-        ESP_LOGW(TAG, "[%s] Notify registration failed: %s", this->parent_->address_str(), esp_err_to_name(err));
-      }
+      this->link_.set_handle(chr->handle);
+      if (this->parent_->register_for_notify(chr->handle) != ESP_OK)
+        this->link_fault_(LOG_STR("Notify registration failed"));
       break;
     }
     case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
-      if (this->char_handle_ == 0 || param->reg_for_notify.handle != this->char_handle_)
+      if (!this->link_.is_ours(param->reg_for_notify.handle))
         break;
       if (param->reg_for_notify.status != ESP_GATT_OK) {
-        ESP_LOGW(TAG, "[%s] Notify registration failed, status %d", this->parent_->address_str(),
-                 param->reg_for_notify.status);
+        this->link_fault_(LOG_STR("Notify registration failed"));
         break;
       }
+      // BLEClientBase has just requested the CCCD write in this event; the BLE stack queues our first request
+      // behind it. The CCCD lookup needs the GATT cache, which ble_client frees once every node is established.
       this->node_state = espbt::ClientState::ESTABLISHED;
-      this->connected_ = true;
+      if (this->link_.up())
+        this->status_clear_warning();
       ESP_LOGI(TAG, "[%s] Connected", this->parent_->address_str());
       break;
     }
     case ESP_GATTC_NOTIFY_EVT: {
-      if (this->connected_ && param->notify.handle == this->char_handle_)
+      if (this->link_.accepts(param->notify.handle))
         this->receive_bytes({param->notify.value, param->notify.value_len});
       break;
     }
@@ -75,27 +75,28 @@ void GenibusBLE::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t g
 }
 
 void GenibusBLE::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
-  if (event != ESP_GAP_BLE_AUTH_CMPL_EVT || !this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr))
+  if (event != ESP_GAP_BLE_AUTH_CMPL_EVT || param->ble_security.auth_cmpl.success ||
+      !this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr))
     return;
-  if (param->ble_security.auth_cmpl.success) {
-    this->status_clear_warning();
-    return;
+  // esp32_ble_client logs every failure with its reason; give the hint once per series of failures.
+  // Only press the Connect button briefly: holding it for 2 s changes the control mode of an ALPHA3
+  // (installation and operating instructions 99392378, section 7.10).
+  if (this->link_.fault()) {
+    ESP_LOGW(TAG,
+             "[%s] Pairing failed. Allow pairing on the pump (ALPHA: press Connect briefly, do not hold it) and "
+             "reconnect. If it fails after every disconnect, check the ESP-IDF version for bonding bugs",
+             this->parent_->address_str());
+    this->status_set_warning(LOG_STR("Pairing failed"));
   }
-  // The pump was seen and answered, so this is a real fault, unlike a pump without power
-  ESP_LOGW(TAG,
-           "[%s] Pairing failed, reason %u. Put the pump in pairing mode (ALPHA: hold Connect for 3 s) "
-           "and reconnect. If it fails again after each disconnect, check the ESP-IDF version for bonding bugs",
-           this->parent_->address_str(), param->ble_security.auth_cmpl.fail_reason);
-  this->status_set_warning(LOG_STR("Pairing failed"));
 }
 
 bool GenibusBLE::write_frame(std::span<const uint8_t> frame) {
-  if (!this->connected_)
+  if (!this->link_.is_up())
     return false;
   return write_in_chunks(frame, CHUNK_SIZE, [this](std::span<const uint8_t> chunk) {
     // The API does not write through the pointer
     esp_err_t err = esp_ble_gattc_write_char(this->parent_->get_gattc_if(), this->parent_->get_conn_id(),
-                                             this->char_handle_, chunk.size(), const_cast<uint8_t *>(chunk.data()),
+                                             this->link_.handle(), chunk.size(), const_cast<uint8_t *>(chunk.data()),
                                              ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "[%s] Write failed: %s", this->parent_->address_str(), esp_err_to_name(err));
@@ -105,13 +106,24 @@ bool GenibusBLE::write_frame(std::span<const uint8_t> frame) {
 }
 
 void GenibusBLE::link_down_() {
-  this->char_handle_ = 0;
-  if (!this->connected_)
+  if (!this->link_.down())
     return;
-  // is_connected() must be false before the bus ends the open requests
-  this->connected_ = false;
   ESP_LOGI(TAG, "[%s] Disconnected", this->parent_->address_str());
   this->connection_lost_();
+  // A timeout just before the link dropped is no fault; without a link no transaction would clear it
+  if (!this->link_.has_fault())
+    this->status_clear_warning();
+}
+
+void GenibusBLE::link_fault_(const LogString *reason) {
+  if (this->link_.fault()) {
+    ESP_LOGW(TAG, "[%s] %s, disconnecting", this->parent_->address_str(), LOG_STR_ARG(reason));
+    this->status_set_warning(reason);
+  } else {
+    ESP_LOGD(TAG, "[%s] %s, disconnecting", this->parent_->address_str(), LOG_STR_ARG(reason));
+  }
+  // Free the pump's only connection for the Grundfos GO app; ble_client reconnects when auto_connect is on
+  this->parent_->disconnect();
 }
 
 }  // namespace esphome::genibus_ble

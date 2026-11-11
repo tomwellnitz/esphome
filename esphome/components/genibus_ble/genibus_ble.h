@@ -9,6 +9,8 @@
 #include "esphome/components/esp32_ble_tracker/esp32_ble_tracker.h"
 #include "esphome/components/genibus/genibus.h"
 
+#include "link_state.h"
+
 #include <esp_gap_ble_api.h>
 #include <esp_gattc_api.h>
 
@@ -26,14 +28,14 @@ class GenibusBLE final : public genibus::GenibusBus, public ble_client::BLEClien
                            esp_ble_gattc_cb_param_t *param) override;
   void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) override;
 
-  bool is_connected() const override { return this->connected_; }
+  bool is_connected() const override { return this->link_.is_up(); }
 
  protected:
   bool write_frame(std::span<const uint8_t> frame) override;
   void link_down_();
+  void link_fault_(const LogString *reason);
 
-  uint16_t char_handle_{0};
-  bool connected_{false};
+  LinkState link_;
 };
 
 }  // namespace esphome::genibus_ble
