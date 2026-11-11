@@ -42,6 +42,7 @@ TEST_F(GrundfosAlphaTest, UnsupportedModelReadsNothing) {
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA15);
   EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_TRUE(this->pump_.status_has_warning());
   this->pump_.update();
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->flow_.has_state());
@@ -53,8 +54,39 @@ TEST_F(GrundfosAlphaTest, IdentityErrorIsRetried) {
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_UNKNOWN_ID);
   EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_TRUE(this->pump_.status_has_warning());
   this->pump_.update();
   EXPECT_EQ(this->next_request_(), FRAME_IDENTITY);
+}
+
+TEST_F(GrundfosAlphaTest, ShortIdentityIsRetriedAndWarningClearsOnSuccess) {
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_SHORT);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_TRUE(this->pump_.status_has_warning());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_SHORT);
+  EXPECT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_ALPHA3);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
+}
+
+TEST_F(GrundfosAlphaTest, ResponseWithoutOpenRequestIsIgnored) {
+  // Before the identity is known
+  this->pump_.on_response({genibus::GenibusError::GENIBUS_ERROR_NONE, {}});
+  EXPECT_TRUE(this->next_request_().empty());
+  // After the chain has ended
+  this->read_all_();
+  ASSERT_TRUE(this->next_request_().empty());
+  this->pump_.on_response({genibus::GenibusError::GENIBUS_ERROR_NONE, {}});
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FLOAT_EQ(this->power_.state, 20.0f);
+  EXPECT_FALSE(this->pump_.status_has_warning());
 }
 
 TEST_F(GrundfosAlphaTest, UnexpectedVersionIsNotDecoded) {

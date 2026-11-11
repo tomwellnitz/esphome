@@ -17,24 +17,27 @@ static constexpr uint8_t CLASS_MEASURED_DATA = 2;
 static constexpr uint8_t IDENTITY_REQUEST[] = {CLASS_MEASURED_DATA, 0x03, 148, 149, 150};
 static constexpr uint8_t WARNED_IDENTITY = 0x80;
 
-// The Grundfos GO app converts head with 9804 Pa per metre; the pump's factory head limits are whole multiples of it
+// Grundfos GO app 8.5.2, unit_factor_mapping.csv: 1 m = 9804.14 Pa. The ALPHA3 factory limits of the constant
+// pressure set point (86/15: 19608, 39216, 58824 Pa) are whole multiples of 9804. The alpha3 component uses 10000.
 static constexpr float PASCAL_PER_METER = 9804.0f;
 static constexpr float SECONDS_PER_HOUR = 3600.0f;
 
-// Object layouts from the Grundfos GENI profile of each model, by field name.
+// Object layouts and field names from the Grundfos GENI profile in the Grundfos GO app 8.5.2
+// (ALPHA3 Model B: profile 52_1_0, version V01.11.00.00037). The alpha3 component reads the same requests,
+// reply headers and the offsets 0, 4, 0, 8, 12 and 20 from a real ALPHA3.
 // 93/289, type 0x0130 v1: pump_flow (m³/s), pump_differential_pressure (Pa), inlet_pressure, outlet_pressure,
 // media_temperature, differential_temperature
 static constexpr Field ALPHA3_PROCESS_FIELDS[] = {
     {Reading::READING_FLOW, 0, SECONDS_PER_HOUR},
     {Reading::READING_HEAD, 4, 1.0f / PASCAL_PER_METER},
-    {Reading::READING_MEDIUM_TEMPERATURE, 16, 1.0f},
+    {Reading::READING_MEDIUM_TEMPERATURE, 16, 1.0f},  // °C, unlike the SI units of the other fields
 };
 // 87/69, type 0x0100 v1: grid_voltage, dc_link_voltage, current, power_consumption, dc_power_consumption,
 // absolute_speed (rpm), three temperatures, pwm_type
 static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
     {Reading::READING_VOLTAGE, 0, 1.0f},
     {Reading::READING_CURRENT, 8, 1.0f},
-    {Reading::READING_POWER, 12, 1.0f},
+    {Reading::READING_POWER, 12, 1.0f},  // power_consumption, as alpha3; the app shows dc_power_consumption
     {Reading::READING_SPEED, 20, 1.0f},
 };
 static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
@@ -106,6 +109,7 @@ bool GrundfosAlpha::identify_(const genibus::GenibusResponse &response) {
     if (this->first_warning_(WARNED_IDENTITY)) {
       ESP_LOGW(TAG, "No unit family, type and version in the reply (class %u, ACK %u)", apdu.data_class, apdu.ack);
     }
+    this->status_set_warning(LOG_STR("No pump identity"));
     return false;
   }
   const uint8_t family = apdu.data[0];
@@ -114,12 +118,14 @@ bool GrundfosAlpha::identify_(const genibus::GenibusResponse &response) {
   for (const auto &model : MODELS) {
     if (model.family == family && model.type == type && model.version == version) {
       this->model_ = &model;
+      this->status_clear_warning();
       ESP_LOGI(TAG, "Found %s (unit %u/%u/%u)", LOG_STR_ARG(ModelNames::get_log_str(model.name, 0)), family, type,
                version);
       return true;
     }
   }
   this->unsupported_ = true;
+  this->status_set_warning(LOG_STR("Model not supported"));
   ESP_LOGW(TAG, "Model not supported yet (unit family/type/version %u/%u/%u), please report it", family, type, version);
   return false;
 }

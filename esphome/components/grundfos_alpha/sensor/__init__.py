@@ -31,11 +31,11 @@ DEPENDENCIES = ["grundfos_alpha"]
 CONF_MEDIUM_TEMPERATURE = "medium_temperature"
 
 
-def _schema(unit: str, decimals: int, device_class: str = cv.UNDEFINED) -> cv.Schema:
+def _schema(unit: str, decimals: int, device_class: str | None = None) -> cv.Schema:
     return sensor.sensor_schema(
         unit_of_measurement=unit,
         accuracy_decimals=decimals,
-        device_class=device_class,
+        device_class=device_class or cv.UNDEFINED,
         state_class=STATE_CLASS_MEASUREMENT,
     )
 
