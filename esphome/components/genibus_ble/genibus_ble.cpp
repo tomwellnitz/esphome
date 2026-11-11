@@ -79,11 +79,11 @@ void GenibusBLE::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_
       !this->parent_->check_addr(param->ble_security.auth_cmpl.bd_addr))
     return;
   // esp32_ble_client logs every failure with its reason; give the hint once per series of failures.
-  // Only press the Connect button briefly: holding it for 2 s changes the control mode of an ALPHA3
+  // Do not tell users to hold the Connect button: holding it for 2 s changes the control mode of an ALPHA3
   // (installation and operating instructions 99392378, section 7.10).
   if (this->link_.fault()) {
     ESP_LOGW(TAG,
-             "[%s] Pairing failed. Allow pairing on the pump (ALPHA: press Connect briefly, do not hold it) and "
+             "[%s] Pairing failed. Allow pairing on the pump (ALPHA: do not hold Connect, that changes the mode) and "
              "reconnect. If it fails after every disconnect, check the ESP-IDF version for bonding bugs",
              this->parent_->address_str());
     this->status_set_warning(LOG_STR("Pairing failed"));
