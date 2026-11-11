@@ -28,15 +28,13 @@ bool GenibusBus::send(GenibusDevice *device, std::span<const uint8_t> apdus) {
     ESP_LOGW(TAG, "Request of %u bytes not sent", static_cast<unsigned>(apdus.size()));
     return false;
   }
-  if (!this->is_connected())
+  if (!this->is_connected() || this->active_ == device)
     return false;
   for (auto &pending : this->pending_) {
     if (pending.device != device)
       continue;
-    if (pending.size != 0 || this->active_ == device) {
-      ESP_LOGV(TAG, "Request to 0x%02X replaced", device->get_address());
-    }
-    this->active_replaced_ = this->active_replaced_ || this->active_ == device;
+    if (pending.size != 0)
+      return false;
     std::copy(apdus.begin(), apdus.end(), pending.apdus.begin());
     pending.size = static_cast<uint8_t>(apdus.size());
     this->enable_loop();
@@ -46,12 +44,30 @@ bool GenibusBus::send(GenibusDevice *device, std::span<const uint8_t> apdus) {
   return false;
 }
 
+bool GenibusBus::is_busy(const GenibusDevice *device) const {
+  if (this->active_ == device)
+    return true;
+  for (const auto &pending : this->pending_) {
+    if (pending.device == device)
+      return pending.size != 0;
+  }
+  return false;
+}
+
 void GenibusBus::loop() {
+  const uint32_t now = App.get_loop_component_start_time();
   if (this->active_ != nullptr) {
-    if (App.get_loop_component_start_time() - this->sent_at_ < RESPONSE_TIMEOUT_MS)
+    if (now - this->sent_at_ < this->response_timeout_ms_)
       return;
     this->rx_.reset();
+    this->quiet_ = true;
+    this->quiet_since_ = now;
     this->finish_(GenibusError::GENIBUS_ERROR_TIMEOUT);
+  }
+  if (this->quiet_) {
+    if (now - this->quiet_since_ < this->quiet_ms_)
+      return;
+    this->quiet_ = false;
   }
   this->transmit_next_();
 }
@@ -75,7 +91,6 @@ void GenibusBus::transmit_next_() {
     this->next_slot_ = static_cast<uint8_t>((slot + 1) % count);
     this->active_ = pending.device;
     this->active_address_ = pending.device->get_address();
-    this->active_replaced_ = false;
     this->sent_at_ = App.get_loop_component_start_time();
     this->rx_.reset();
     ESP_LOGV_HEX(TAG, frame.data(), size, MAX_LOG_BYTES, "TX %s");
@@ -99,9 +114,10 @@ void GenibusBus::handle_frame_() {
   const auto frame = this->rx_.frame();
   ESP_LOGV_HEX(TAG, frame.data(), frame.size(), MAX_LOG_BYTES, "RX %s");
   if (this->active_ == nullptr) {
-    ESP_LOGV(TAG, "Frame without request dropped");
+    ESP_LOGV(TAG, "Frame dropped: %s", this->quiet_ ? LOG_STR_LITERAL("late reply") : LOG_STR_LITERAL("no request"));
     return;
   }
+  // Fine for BLE with one pump; a shared RS-485 bus would need the address check first
   if (!this->rx_.crc_ok()) {
     this->finish_(GenibusError::GENIBUS_ERROR_CRC);
     return;
@@ -122,17 +138,16 @@ void GenibusBus::handle_frame_() {
 
 void GenibusBus::finish_(GenibusError error, std::span<const uint8_t> apdus) {
   GenibusDevice *device = this->active_;
-  const bool replaced = this->active_replaced_;
   this->active_ = nullptr;
-  this->active_replaced_ = false;
   this->enable_loop();
   // A lost connection is the transport's to report
-  if (error != GenibusError::GENIBUS_ERROR_DISCONNECTED &&
-      !this->status_comm_result(error == GenibusError::GENIBUS_ERROR_NONE)) {
-    ESP_LOGW(TAG, "Request to 0x%02X: %s", this->active_address_,
-             LOG_STR_ARG(GenibusErrorStrings::get_log_str(static_cast<uint8_t>(error), 0)));
+  if (error != GenibusError::GENIBUS_ERROR_DISCONNECTED) {
+    const LogString *text = GenibusErrorStrings::get_log_str(static_cast<uint8_t>(error), 0);
+    if (!this->status_comm_result(error == GenibusError::GENIBUS_ERROR_NONE, text)) {
+      ESP_LOGV(TAG, "Request to 0x%02X: %s", this->active_address_, LOG_STR_ARG(text));
+    }
   }
-  if (device != nullptr && !replaced)
+  if (device != nullptr)
     device->on_response({error, apdus});
 }
 

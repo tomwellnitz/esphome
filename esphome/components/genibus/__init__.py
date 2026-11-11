@@ -16,32 +16,39 @@ GenibusDevice = genibus_ns.class_(
     "GenibusDevice", cg.PollingComponent, cg.Parented.template(GenibusBus)
 )
 
-# Base schema of a transport (BLE, RS-485) that derives from GenibusBus
-GENIBUS_BUS_SCHEMA = cv.Schema(
-    {
-        cv.Optional(CONF_MASTER_ADDRESS, default=0xF8): cv.hex_uint8_t,
-    }
-).extend(cv.COMPONENT_SCHEMA)
 
-# Base schema of a device on the bus
-GENIBUS_DEVICE_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(CONF_GENIBUS_ID): cv.use_id(GenibusBus),
-        cv.Optional(CONF_ADDRESS, default=0xE7): cv.hex_uint8_t,
-    }
-)
+def genibus_bus_schema(default_master_address: int) -> cv.Schema:
+    """Base schema of a transport that derives from GenibusBus; the transport picks the default address."""
+    return cv.Schema(
+        {
+            cv.Optional(
+                CONF_MASTER_ADDRESS, default=default_master_address
+            ): cv.hex_uint8_t,
+        }
+    ).extend(cv.COMPONENT_SCHEMA)
+
+
+def genibus_device_schema(default_address: int) -> cv.Schema:
+    """Base schema of a device on the bus; the device picks its default address."""
+    return cv.Schema(
+        {
+            cv.GenerateID(CONF_GENIBUS_ID): cv.use_id(GenibusBus),
+            cv.Optional(CONF_ADDRESS, default=default_address): cv.hex_uint8_t,
+        }
+    )
+
 
 _register_device = cg.slot_list("GENIBUS_DEVICE_COUNT", "register_device", DOMAIN)
 
 
 async def register_genibus_bus(var: MockObj, config: ConfigType) -> None:
-    """Register a transport created with GENIBUS_BUS_SCHEMA."""
+    """Register a transport created with genibus_bus_schema()."""
     await cg.register_component(var, config)
     cg.add(var.set_master_address(config[CONF_MASTER_ADDRESS]))
 
 
 async def register_genibus_device(var: MockObj, config: ConfigType) -> None:
-    """Register a device created with GENIBUS_DEVICE_SCHEMA, and give it a request slot on its bus."""
+    """Register a device created with genibus_device_schema(), and give it a request slot on its bus."""
     await cg.register_component(var, config)
     bus = await cg.get_variable(config[CONF_GENIBUS_ID])
     await cg.register_parented(var, bus)

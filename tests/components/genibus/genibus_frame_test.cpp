@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -90,6 +91,19 @@ TEST(GenibusFrame, DropsGarbageBeforeStart) {
   noisy.insert(noisy.end(), REPLY_012F.begin(), REPLY_012F.end());
   EXPECT_EQ(feed(assembler, noisy, 5), 1);
   EXPECT_EQ(vec(assembler.frame()), REPLY_012F);
+}
+
+TEST(GenibusFrame, StartsOverWithoutReset) {
+  FrameAssembler assembler;
+  Bytes two = REPLY_012F;
+  two.insert(two.end(), REPLY_012F.begin(), REPLY_012F.end());
+  EXPECT_EQ(feed(assembler, two, 7), 2);
+  EXPECT_EQ(vec(assembler.frame()), REPLY_012F);
+  Bytes longest = {0x24, 0xFF};
+  longest.resize(MAX_FRAME_SIZE, 0);
+  Bytes many = longest;
+  many.insert(many.end(), longest.begin(), longest.end());
+  EXPECT_EQ(feed(assembler, many, 64), 2);
 }
 
 TEST(GenibusFrame, DetectsBadCrc) {

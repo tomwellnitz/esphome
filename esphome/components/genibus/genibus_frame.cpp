@@ -62,6 +62,9 @@ bool parse_data_object(const Apdu &apdu, DataObject &object) {
 }
 
 bool FrameAssembler::feed(uint8_t byte) {
+  // A complete frame that was not reset is dropped, so the buffer never overflows
+  if (this->size_ >= 2 && this->size_ == this->buffer_[1] + FRAME_OVERHEAD)
+    this->size_ = 0;
   if (this->size_ == 0 && byte != START_REPLY && byte != START_REQUEST && byte != START_MESSAGE)
     return false;
   // A length below DA and SA cannot start a frame

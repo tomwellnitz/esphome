@@ -71,7 +71,8 @@ bool parse_data_object(const Apdu &apdu, DataObject &object);
 /// Collects bytes that may arrive in any chunks into one frame.
 class FrameAssembler {
  public:
-  /// Add a byte; true when it completes a frame. Bytes before a start delimiter are dropped.
+  /// Add a byte; true when it completes a frame. Bytes before a start delimiter are dropped, and so is a complete
+  /// frame when the next byte comes before reset().
   bool feed(uint8_t byte);
   void reset() { this->size_ = 0; }
   std::span<const uint8_t> frame() const { return {this->buffer_.data(), this->size_}; }
