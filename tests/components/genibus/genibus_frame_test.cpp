@@ -114,6 +114,7 @@ TEST(GenibusFrame, DetectsBadCrc) {
   EXPECT_FALSE(assembler.crc_ok());
   assembler.reset();
   EXPECT_FALSE(assembler.crc_ok());
+  EXPECT_TRUE(assembler.apdus().empty());
 }
 
 TEST(GenibusFrame, LongestFrameFits) {

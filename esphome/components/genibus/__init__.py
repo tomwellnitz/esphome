@@ -29,7 +29,10 @@ def genibus_bus_schema(default_master_address: int) -> cv.Schema:
 
 
 def genibus_device_schema(default_address: int) -> cv.Schema:
-    """Base schema of a device on the bus; the device picks its default address."""
+    """Base schema of a device on the bus; the device picks its default address.
+
+    It holds no component schema: the device extends it with cv.polling_component_schema().
+    """
     return cv.Schema(
         {
             cv.GenerateID(CONF_GENIBUS_ID): cv.use_id(GenibusBus),

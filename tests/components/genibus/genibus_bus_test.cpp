@@ -19,12 +19,14 @@ const Bytes GET_FLOW_HEAD = {0x0A, 0x03, 0x5D, 0x01, 0x21};
 const Bytes GET_POWER = {0x0A, 0x03, 0x57, 0x00, 0x45};
 const Bytes FRAME_FLOW_HEAD = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x5D, 0x01, 0x21, 0x52, 0x1F};
 const Bytes FRAME_POWER = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x57, 0x00, 0x45, 0x8A, 0xCD};
-// Flow and head object: type 0x0130 version 1, 24 bytes
+// Flow and head object: header type 0x0130 version 1, 24 bytes as the pump sends it; the values are made up
 const Bytes REPLY_FLOW_HEAD = {0x24, 0x23, 0xF8, 0xE7, 0x0A, 0x1F, 0x00, 0x01, 0x30, 0x01, 0x00, 0x00, 0x18,
                                0x3A, 0x83, 0x12, 0x6F, 0x46, 0x1C, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17, 0x3B};
 const Bytes REPLY_ACK = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x01, 0x00, 0xAE, 0xA2};
-const Bytes REPLY_ID_UNKNOWN = {0x24, 0x04, 0xF8, 0xE7, 0x0A, 0x80, 0x26, 0x99};
+// Class 2 GET of ID 0x51 and its answer "ID unknown", which carries the first unknown ID (spec 2005, figure 3)
+const Bytes GET_UNKNOWN_ID = {0x02, 0x01, 0x51};
+const Bytes REPLY_ID_UNKNOWN = {0x24, 0x05, 0xF8, 0xE7, 0x02, 0x81, 0x51, 0x56, 0x4F};
 const Bytes REPLY_APDU_TOO_LONG = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0xC8, 0xC0};
 const Bytes REPLY_EMPTY = {0x24, 0x02, 0xF8, 0xE7, 0x4A, 0xA2};
 const Bytes REPLY_OTHER_NODE = {0x24, 0x05, 0xF8, 0x20, 0x0A, 0x01, 0x00, 0x4C, 0x2B};
@@ -222,6 +224,35 @@ TEST_F(GenibusBusTest, ReplyWithoutApduIsSuccess) {
   EXPECT_TRUE(this->pump_.responses[0].apdus.empty());
 }
 
+TEST_F(GenibusBusTest, QuietPeriodIsSettable) {
+  this->bus_.set_quiet_period(50);
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->run_();
+  this->run_(TIMEOUT_MS);
+  this->bus_.send(&this->pump_, GET_POWER);
+  this->run_(49);
+  EXPECT_EQ(this->bus_.written.size(), 1u);
+  this->run_(1);
+  EXPECT_EQ(this->bus_.written.size(), 2u);
+}
+
+TEST_F(GenibusBusTest, FalseStartRecoversAfterTimeout) {
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->run_();
+  // A stray start byte with a long length swallows the real answer; only the timeout ends the wait
+  this->receive_({0x24, 0x30});
+  this->receive_(REPLY_FLOW_HEAD);
+  EXPECT_TRUE(this->pump_.responses.empty());
+  this->run_(TIMEOUT_MS);
+  ASSERT_EQ(this->pump_.responses.size(), 1u);
+  EXPECT_EQ(this->pump_.responses[0].error, GenibusError::GENIBUS_ERROR_TIMEOUT);
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->run_(QUIET_MS);
+  this->receive_(REPLY_FLOW_HEAD);
+  ASSERT_EQ(this->pump_.responses.size(), 2u);
+  EXPECT_EQ(this->pump_.responses[1].error, GenibusError::GENIBUS_ERROR_NONE);
+}
+
 TEST_F(GenibusBusTest, CrcErrorEndsTransaction) {
   this->bus_.send(&this->pump_, GET_FLOW_HEAD);
   this->run_();
@@ -244,15 +275,22 @@ TEST_F(GenibusBusTest, MalformedReplyEndsTransaction) {
 TEST_F(GenibusBusTest, AckErrorReachesDevice) {
   this->bus_.send(&this->pump_, GET_FLOW_HEAD);
   this->run_();
+  this->run_(TIMEOUT_MS);
+  ASSERT_TRUE(this->bus_.status_has_warning());
+  this->bus_.send(&this->pump_, GET_UNKNOWN_ID);
+  this->run_(QUIET_MS);
+  ASSERT_EQ(this->bus_.written.size(), 2u);
+  EXPECT_EQ(this->bus_.written[1], (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x02, 0x01, 0x51, 0xE3, 0x3D}));
   this->receive_(REPLY_ID_UNKNOWN);
-  ASSERT_EQ(this->pump_.responses.size(), 1u);
-  EXPECT_EQ(this->pump_.responses[0].error, GenibusError::GENIBUS_ERROR_NONE);
-  ApduReader reader(this->pump_.responses[0].apdus);
+  ASSERT_EQ(this->pump_.responses.size(), 2u);
+  EXPECT_EQ(this->pump_.responses[1].error, GenibusError::GENIBUS_ERROR_NONE);
+  EXPECT_FALSE(this->bus_.status_has_warning());  // a negative ACK is a working bus; the device judges it
+  ApduReader reader(this->pump_.responses[1].apdus);
   Apdu apdu{};
   ASSERT_TRUE(reader.next(apdu));
   EXPECT_EQ(apdu.ack, 2);
-  DataObject object{};
-  EXPECT_FALSE(parse_data_object(apdu, object));
+  EXPECT_EQ(apdu.data.size(), 1u);
+  EXPECT_EQ(apdu.data[0], 0x51);
 }
 
 TEST_F(GenibusBusTest, IgnoresOtherTraffic) {
@@ -288,6 +326,21 @@ TEST_F(GenibusBusTest, RejectedWhileOnTheWire) {
   EXPECT_FALSE(this->bus_.is_busy(&this->pump_));
   this->run_();
   EXPECT_EQ(this->bus_.written.size(), 1u);  // the rejected request never goes out
+}
+
+TEST_F(GenibusBusTest, DevicesTakeTurns) {
+  this->pump_.send_next = true;
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->bus_.send(&this->other_, GET_POWER);
+  this->run_();
+  this->receive_(REPLY_FLOW_HEAD);  // the pump sends again from on_response()
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 2u);
+  EXPECT_EQ(this->bus_.written[1][2], 0x20);  // the other device was waiting longer
+  this->receive_(REPLY_OTHER_NODE);
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 3u);
+  EXPECT_EQ(this->bus_.written[2], FRAME_POWER);
 }
 
 TEST_F(GenibusBusTest, DeviceCanSendFromResponse) {
@@ -330,6 +383,27 @@ TEST_F(GenibusBusTest, TransportDownWithoutNotice) {
   EXPECT_TRUE(this->bus_.written.empty());
   ASSERT_EQ(this->pump_.responses.size(), 1u);
   EXPECT_EQ(this->pump_.responses[0].error, GenibusError::GENIBUS_ERROR_DISCONNECTED);
+}
+
+TEST_F(GenibusBusTest, TransportDownWithoutNoticeOnTheWire) {
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->run_();
+  this->bus_.send(&this->other_, GET_POWER);
+  this->bus_.connected = false;
+  this->run_(TIMEOUT_MS);
+  ASSERT_EQ(this->pump_.responses.size(), 1u);
+  EXPECT_EQ(this->pump_.responses[0].error, GenibusError::GENIBUS_ERROR_TIMEOUT);
+  EXPECT_TRUE(this->other_.responses.empty());  // still waiting out the quiet period
+  this->run_(QUIET_MS);
+  ASSERT_EQ(this->other_.responses.size(), 1u);
+  EXPECT_EQ(this->other_.responses[0].error, GenibusError::GENIBUS_ERROR_DISCONNECTED);
+  EXPECT_EQ(this->bus_.written.size(), 1u);
+  this->bus_.connected = true;
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->run_();
+  this->receive_(REPLY_FLOW_HEAD);
+  ASSERT_EQ(this->pump_.responses.size(), 2u);
+  EXPECT_EQ(this->pump_.responses[1].error, GenibusError::GENIBUS_ERROR_NONE);
 }
 
 TEST_F(GenibusBusTest, WriteFailureEndsTransaction) {

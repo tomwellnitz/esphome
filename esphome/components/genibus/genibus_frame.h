@@ -77,8 +77,12 @@ class FrameAssembler {
   void reset() { this->size_ = 0; }
   std::span<const uint8_t> frame() const { return {this->buffer_.data(), this->size_}; }
   bool crc_ok() const;
-  /// The APDUs of a complete frame.
-  std::span<const uint8_t> apdus() const { return this->frame().subspan(4, this->size_ - FRAME_OVERHEAD - 2); }
+  /// The APDUs of a complete frame; empty while fewer than MIN_FRAME_SIZE bytes are in.
+  std::span<const uint8_t> apdus() const {
+    if (this->size_ < MIN_FRAME_SIZE)
+      return {};
+    return this->frame().subspan(4, this->size_ - MIN_FRAME_SIZE);
+  }
 
  protected:
   std::array<uint8_t, MAX_FRAME_SIZE> buffer_{};

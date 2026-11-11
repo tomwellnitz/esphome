@@ -27,9 +27,12 @@ enum class GenibusError : uint8_t {
 };
 
 /// The answer to a request; apdus points into the receive buffer and is valid only during the callback. It is empty
-/// on error, and also on success when the reply has no APDU (LE = 2). Each APDU still carries its own ACK code.
-/// GENIbus has no transaction id, so a reply cannot be matched to its request for sure: a device checks the class,
-/// object type and version of every reply before it reads values.
+/// on error, and also on success when the reply has no APDU (LE = 2).
+/// GENIBUS_ERROR_NONE only means a valid reply frame arrived: an APDU with an ACK code other than 0 (unknown class or
+/// ID, illegal operation) is still a success for the bus and clears its warning, so the device checks each ACK.
+/// GENIbus has no transaction id: a reply that comes after the timeout and the quiet period is taken for the answer
+/// to the device's next request. A device checks class, object type and version of every reply, and counts a write
+/// as done only after reading the value back, never on the acknowledgement alone.
 struct GenibusResponse {
   GenibusError error;
   std::span<const uint8_t> apdus;
@@ -55,13 +58,15 @@ class GenibusBus : public Component {
   void set_master_address(uint8_t address) { this->master_address_ = address; }
   uint8_t get_master_address() const { return this->master_address_; }
   void set_response_timeout(uint32_t timeout_ms) { this->response_timeout_ms_ = timeout_ms; }
+  void set_quiet_period(uint32_t quiet_ms) { this->quiet_ms_ = quiet_ms; }
 
   SLOT_LIST_REQUIRES(GENIBUS_DEVICE_COUNT)
   void register_device(GenibusDevice *device) { this->pending_.push_back({device, {}, 0}); }
 
-  /// Queue the request of device. Returns false, queueing nothing, when the bus is not connected, the device
-  /// already has a request open (see is_busy()), or the request is empty or too long. Every accepted request gets
-  /// exactly one on_response(); the device's slot is free again when on_response() runs.
+  /// Queue the request of device. Returns false, queueing nothing, when the bus is not connected, the request is
+  /// empty or longer than MAX_REQUEST_SIZE, the device is not registered, or it already has a request open (see
+  /// is_busy()). Every accepted request gets exactly one on_response(); the device's slot is free again when
+  /// on_response() runs, so it may send its next request from there.
   bool send(GenibusDevice *device, std::span<const uint8_t> apdus);
   /// Whether device has a request waiting or on the wire.
   bool is_busy(const GenibusDevice *device) const;
@@ -74,7 +79,8 @@ class GenibusBus : public Component {
  protected:
   /// Write a whole frame; a transport that needs smaller pieces splits it.
   virtual bool write_frame(std::span<const uint8_t> frame) = 0;
-  /// Call when the connection drops: every open and waiting request ends with GENIBUS_ERROR_DISCONNECTED.
+  /// Call when the connection drops, after is_connected() has started to return false: every open and waiting request
+  /// ends with GENIBUS_ERROR_DISCONNECTED, and requests sent from those callbacks are refused.
   void connection_lost_();
 
   void handle_frame_();
