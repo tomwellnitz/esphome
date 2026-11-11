@@ -81,9 +81,12 @@ void GenibusBus::transmit_next_() {
     this->disable_loop();
     return;
   }
+  // Wrap by comparison, not modulo: with no devices count is 0
   const size_t count = this->pending_.size();
-  for (size_t i = 0; i < count; i++) {
-    const size_t slot = (this->next_slot_ + i) % count;
+  size_t slot = this->next_slot_;
+  for (size_t i = 0; i < count; i++, slot++) {
+    if (slot >= count)
+      slot = 0;
     auto &pending = this->pending_[slot];
     if (pending.size == 0)
       continue;
@@ -91,7 +94,7 @@ void GenibusBus::transmit_next_() {
     const size_t size = build_request(frame, pending.device->get_address(), this->master_address_,
                                       {pending.apdus.data(), pending.size});
     pending.size = 0;
-    this->next_slot_ = static_cast<uint8_t>((slot + 1) % count);
+    this->next_slot_ = static_cast<uint8_t>(slot + 1);
     this->active_ = pending.device;
     this->active_address_ = pending.device->get_address();
     this->sent_at_ = App.get_loop_component_start_time();
