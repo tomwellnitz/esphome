@@ -1,0 +1,87 @@
+#pragma once
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
+namespace esphome::genibus {
+
+// Start delimiters (SD)
+static constexpr uint8_t START_REQUEST = 0x27;
+static constexpr uint8_t START_REPLY = 0x24;
+static constexpr uint8_t START_MESSAGE = 0x26;
+
+// SD, LE, DA, SA, ..., CRC high, CRC low; LE counts DA up to the last data byte
+static constexpr size_t FRAME_OVERHEAD = 4;
+static constexpr size_t MIN_FRAME_SIZE = FRAME_OVERHEAD + 2;
+static constexpr size_t MAX_FRAME_SIZE = FRAME_OVERHEAD + 255;
+
+static constexpr uint8_t CLASS_COMMAND = 3;
+static constexpr uint8_t CLASS_DATA_OBJECT = 10;
+
+// Operation in bits 7-6 of the second APDU byte of a request; bits 5-0 hold the data length
+static constexpr uint8_t OPERATION_GET = 0x00;
+static constexpr uint8_t OPERATION_SET = 0x80;
+static constexpr uint8_t OPERATION_INFO = 0xC0;
+static constexpr uint8_t APDU_LENGTH_MASK = 0x3F;
+
+// status, type (2), version, size (3)
+static constexpr size_t DATA_OBJECT_HEADER_SIZE = 7;
+
+/// CRC-16/GENIBUS of LE up to the last data byte.
+uint16_t frame_crc(const uint8_t *data, size_t len);
+
+/// Build a request frame around apdus into out; returns its size, or 0 when it does not fit.
+size_t build_request(std::span<uint8_t> out, uint8_t destination, uint8_t source, std::span<const uint8_t> apdus);
+
+/// Write a class 10 GET APDU of object/sub_id (5 bytes) and return the pointer past it.
+uint8_t *put_get_object(uint8_t *dst, uint8_t object, uint16_t sub_id);
+
+/// One APDU; data points into the frame.
+struct Apdu {
+  uint8_t data_class;
+  uint8_t ack;  // bits 7-6 of the second byte: ACK code of a reply (0 ok), operation of a request
+  std::span<const uint8_t> data;
+};
+
+/// Walks the APDUs of a frame's data.
+class ApduReader {
+ public:
+  explicit ApduReader(std::span<const uint8_t> apdus) : rest_(apdus) {}
+  /// Read the next APDU; false at the end or when its length does not fit.
+  bool next(Apdu &apdu);
+  bool at_end() const { return this->rest_.empty(); }
+
+ protected:
+  std::span<const uint8_t> rest_;
+};
+
+/// A class 10 data object of a reply; body points into the frame.
+struct DataObject {
+  uint8_t status;
+  uint16_t type;
+  uint8_t version;
+  std::span<const uint8_t> body;
+};
+
+/// Parse a class 10 reply APDU with ACK 0 whose size field matches its body.
+bool parse_data_object(const Apdu &apdu, DataObject &object);
+
+/// Collects bytes that may arrive in any chunks into one frame.
+class FrameAssembler {
+ public:
+  /// Add a byte; true when it completes a frame. Bytes before a start delimiter are dropped.
+  bool feed(uint8_t byte);
+  void reset() { this->size_ = 0; }
+  std::span<const uint8_t> frame() const { return {this->buffer_.data(), this->size_}; }
+  bool crc_ok() const;
+  /// The APDUs of a complete frame.
+  std::span<const uint8_t> apdus() const { return this->frame().subspan(4, this->size_ - FRAME_OVERHEAD - 2); }
+
+ protected:
+  std::array<uint8_t, MAX_FRAME_SIZE> buffer_{};
+  uint16_t size_{0};
+};
+
+}  // namespace esphome::genibus
