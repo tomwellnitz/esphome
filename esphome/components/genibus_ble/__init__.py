@@ -1,7 +1,6 @@
 import esphome.codegen as cg
 from esphome.components import ble_client, genibus
 import esphome.config_validation as cv
-from esphome.const import CONF_ID
 from esphome.types import ConfigType
 
 AUTO_LOAD = ["genibus"]
@@ -24,6 +23,5 @@ CONFIG_SCHEMA = (
 
 
 async def to_code(config: ConfigType) -> None:
-    var = cg.new_Pvariable(config[CONF_ID])
-    await genibus.register_genibus_bus(var, config)
-    await ble_client.register_ble_node(var, config)
+    var = await ble_client.new_ble_node_component(config)
+    genibus.apply_genibus_bus_config(var, config)
