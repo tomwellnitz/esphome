@@ -24,7 +24,7 @@ from esphome.const import (
 )
 from esphome.types import ConfigType
 
-from .. import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
+from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
 
 DEPENDENCIES = ["grundfos_alpha"]
 
