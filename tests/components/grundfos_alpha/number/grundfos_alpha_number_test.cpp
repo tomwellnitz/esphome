@@ -209,6 +209,43 @@ TEST_F(NumberTest, WrongVersionOnTheReadIsNotWritten) {
   EXPECT_FALSE(this->wrote_(FRAME_SET_CP_3_5));
 }
 
+TEST_F(NumberTest, SetPointWaitsForThePollsAfterReconnect) {
+  this->read_constant_pressure_();
+  this->bus_.lose_connection();
+  this->bus_.establish_connection();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // the poll after connecting is on the wire
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);  // the limits are kept, so it is queued
+  this->reply_(REPLY_CONTROL_MODE_CP);
+  // 86/16 first, then the write; no warning for the wait
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+}
+
+TEST_F(NumberTest, SetPointWaitsForTheControlMode) {
+  this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->run_(TIMEOUT_MS);  // the control mode is not known
+  this->run_(QUIET_MS);
+  ASSERT_EQ(this->bus_.written.back(), FRAME_GET_86_15);
+  this->reply_(REPLY_CP_LIMITS);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);  // the write
+  this->reply_(REPLY_CP_SETPOINT);
+  EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);
+}
+
 TEST_F(NumberTest, UnknownOnDisconnect) {
   this->read_constant_pressure_();
   this->bus_.lose_connection();

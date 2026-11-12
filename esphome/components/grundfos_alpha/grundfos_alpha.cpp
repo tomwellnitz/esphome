@@ -149,6 +149,11 @@ void GrundfosAlpha::dump_config() {
   LOG_SELECT("  ", "Control mode", this->selects_[0]);
   LOG_SELECT("  ", "Operating mode", this->selects_[1]);
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+  LOG_NUMBER("  ", "Constant pressure set point", this->numbers_[0]);
+  LOG_NUMBER("  ", "Proportional pressure set point", this->numbers_[1]);
+  LOG_NUMBER("  ", "Constant speed set point", this->numbers_[2]);
+#endif
 }
 
 void GrundfosAlpha::update() {
@@ -237,8 +242,13 @@ void GrundfosAlpha::on_disconnected() {
     this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
     this->status_set_warning(LOG_STR("Write failed"));
   }
-  // The pump may change while away; a write waits for the next poll
-  this->last_known_ = 0;
+  // The pump may change while away; a write waits for the next poll. The limits are kept: they do not change.
+  uint16_t keep = 0;
+#ifdef USE_NUMBER
+  for (const auto &layout : NUMBERS)
+    keep |= 1u << static_cast<size_t>(layout.limits);
+#endif
+  this->last_known_ &= keep;
 #ifdef USE_NUMBER
   for (auto *entity : this->numbers_) {
     if (entity != nullptr && entity->has_state())
@@ -584,18 +594,26 @@ bool GrundfosAlpha::start_job_() {
 
 bool GrundfosAlpha::job_allowed_() const {
 #ifdef USE_NUMBER
+  // job_ready_() made sure the control mode was polled
   constexpr size_t control_mode = static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
   for (const auto &layout : NUMBERS) {
     if (layout.value == this->job_.setting)
-      return (this->last_known_ & (1u << control_mode)) != 0 &&
-             this->last_body_[control_mode][OFFSET_CONTROL_MODE] == layout.control_mode;
+      return this->last_body_[control_mode][OFFSET_CONTROL_MODE] == layout.control_mode;
   }
 #endif
   return true;
 }
 
 bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
-  return (this->last_known_ & (1u << static_cast<size_t>(request.setting))) != 0;
+  uint16_t needed = 1u << static_cast<size_t>(request.setting);
+#ifdef USE_NUMBER
+  // A set point also needs the control mode
+  for (const auto &layout : NUMBERS) {
+    if (layout.value == request.setting)
+      needed |= 1u << static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
+  }
+#endif
+  return (this->last_known_ & needed) == needed;
 }
 
 bool GrundfosAlpha::polls_settings_() const {
