@@ -144,11 +144,10 @@ TEST_F(GrundfosAlphaTest, NotConnectedSkipsQuietly) {
   EXPECT_FALSE(this->pump_.status_has_warning());
 }
 
-TEST_F(GrundfosAlphaTest, DisconnectBetweenPollsGivesNan) {
+TEST_F(GrundfosAlphaTest, DisconnectBetweenPollsGivesNanAtOnce) {
   this->read_all_();
   this->bus_.lose_connection();
-  this->pump_.update();
-  EXPECT_TRUE(this->next_request_().empty());
+  // No update() needed: the values turn unknown when the connection drops
   for (auto *sensor : {&this->flow_, &this->head_, &this->medium_temperature_, &this->voltage_, &this->current_,
                        &this->power_, &this->speed_})
     EXPECT_TRUE(std::isnan(sensor->state));
@@ -164,6 +163,22 @@ TEST_F(GrundfosAlphaTest, DisconnectDuringRequestGivesNanAndRecovers) {
   EXPECT_TRUE(std::isnan(this->power_.state));
   this->bus_.connected = true;
   this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);  // identity stays known
+  this->reply_(REPLY_PROCESS);
+  EXPECT_FLOAT_EQ(this->head_.state, 4.0f);
+}
+
+TEST_F(GrundfosAlphaTest, FirstConnectionIdentifiesAtOnce) {
+  this->bus_.connected = false;
+  this->bus_.establish_connection();
+  EXPECT_EQ(this->next_request_(), FRAME_IDENTITY);
+}
+
+TEST_F(GrundfosAlphaTest, ReconnectReadsAtOnce) {
+  this->read_all_();
+  this->bus_.lose_connection();
+  EXPECT_TRUE(std::isnan(this->flow_.state));
+  this->bus_.establish_connection();
   ASSERT_EQ(this->next_request_(), FRAME_PROCESS);  // identity stays known
   this->reply_(REPLY_PROCESS);
   EXPECT_FLOAT_EQ(this->head_.state, 4.0f);

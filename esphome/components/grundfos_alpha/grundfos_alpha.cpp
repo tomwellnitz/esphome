@@ -84,10 +84,9 @@ void GrundfosAlpha::update() {
 void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   const uint8_t current = this->current_;
   this->current_ = REQUEST_NONE;
-  if (response.error == GenibusError::GENIBUS_ERROR_DISCONNECTED) {
-    this->publish_unknown_();
+  // on_disconnected() follows and marks the values unknown
+  if (response.error == GenibusError::GENIBUS_ERROR_DISCONNECTED)
     return;
-  }
   if (current == REQUEST_IDENTITY) {
     if (this->identify_(response))
       this->request_from_(0);

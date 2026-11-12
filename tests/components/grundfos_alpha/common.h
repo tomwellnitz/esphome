@@ -55,6 +55,10 @@ class TestBus : public genibus::GenibusBus {
     this->connected = false;
     this->connection_lost_();
   }
+  void establish_connection() {
+    this->connected = true;
+    this->connection_established_();
+  }
 
   bool connected{true};
   std::vector<Bytes> written;

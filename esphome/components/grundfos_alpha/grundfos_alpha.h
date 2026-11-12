@@ -70,6 +70,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   void update() override;
   void dump_config() override;
   void on_response(const genibus::GenibusResponse &response) override;
+  void on_connected() override { this->update(); }
+  void on_disconnected() override { this->publish_unknown_(); }
 
  protected:
   bool identify_(const genibus::GenibusResponse &response);
