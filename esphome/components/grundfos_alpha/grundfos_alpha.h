@@ -14,6 +14,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
 #include "esphome/components/text_sensor/text_sensor.h"
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
+#include "esphome/components/select/select.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -47,6 +50,8 @@ struct ObjectLayout {
 /// The settings objects of group 86 the entities show, in the order they are polled after the measurements.
 enum class Setting : uint8_t {
   SETTING_REALIZED,  // 86/8: the operating mode and control source in effect
+  SETTING_CONTROL_MODE,
+  SETTING_OPERATING_MODE,
   SETTING_COUNT,
 };
 
@@ -59,6 +64,29 @@ struct SettingLayout {
 };
 using SettingLayouts = std::array<SettingLayout, static_cast<size_t>(Setting::SETTING_COUNT)>;
 
+enum class SelectSetting : uint8_t { SELECT_SETTING_CONTROL_MODE, SELECT_SETTING_OPERATING_MODE, SELECT_SETTING_COUNT };
+
+enum class JobPhase : uint8_t {
+  JOB_PHASE_NONE,
+  JOB_PHASE_READ,    // the object is read before it is changed
+  JOB_PHASE_WRITE,   // the changed object is written
+  JOB_PHASE_VERIFY,  // the object is read back
+};
+
+// The largest settings object that is written (type 0x012F, 7 bytes)
+static constexpr size_t MAX_WRITE_SIZE = 7;
+// Writes that wait while one runs
+static constexpr size_t WRITE_QUEUE_SIZE = 4;
+
+enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
+
+/// One write: change one byte of a settings object.
+struct WriteRequest {
+  Setting setting;
+  uint8_t offset;  // of the value in the body
+  uint8_t byte_value;
+};
+
 /// The objects read from a pump of one unit family, type and version; settings is null for a model without them.
 struct Model {
   uint8_t family;
@@ -70,11 +98,13 @@ struct Model {
 };
 
 // Values of current_ besides a step of the poll chain
+static constexpr uint8_t REQUEST_WRITE = 0xFD;
 static constexpr uint8_t REQUEST_IDENTITY = 0xFE;
 static constexpr uint8_t REQUEST_NONE = 0xFF;
 
 /// A Grundfos ALPHA circulator pump. It reads the pump's unit family, type and version once, then polls the
-/// objects of that model: the measurements first, then the settings its entities show.
+/// objects of that model: the measurements first, then the settings its entities show. A write reads the settings
+/// object, checks it against the last poll, changes one value, writes it and reads it back; writes run one at a time.
 class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_SENSOR
   SUB_SENSOR(flow)
@@ -96,6 +126,12 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   void on_response(const genibus::GenibusResponse &response) override;
   void on_connected() override { this->update(); }
   void on_disconnected() override;
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
+  void set_select(SelectSetting setting, select::Select *entity) {
+    this->selects_[static_cast<size_t>(setting)] = entity;
+  }
+  void write_select(SelectSetting setting, size_t index);
+#endif
 
  protected:
   bool identify_(const genibus::GenibusResponse &response);
@@ -111,6 +147,19 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool decode_setting_(Setting setting, const genibus::GenibusResponse &response);
   void publish_setting_(Setting setting, std::span<const uint8_t> body);
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  /// Queue a write; a waiting write of the same setting is replaced. Returns false when it is refused.
+  bool enqueue_(const WriteRequest &request, const LogString *what);
+  /// Start the next waiting write; false when none was started.
+  bool start_job_();
+  void continue_job_(const genibus::GenibusResponse &response);
+  void end_job_(const LogString *failure);
+  /// Set the requested value in job_body_.
+  void apply_job_();
+  /// Whether body equals job_body_ outside the value the job changes.
+  bool same_outside_value_(std::span<const uint8_t> body) const;
+  uint16_t job_sub_id_() const;
+#endif
   void publish_(Reading reading, float value);
   void publish_unknown_();
   bool first_warning_(uint8_t bit);
@@ -123,6 +172,25 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   uint8_t warned_{0};
   bool unsupported_{false};
   bool has_values_{false};
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+#ifdef USE_SELECT
+  std::array<select::Select *, static_cast<size_t>(SelectSetting::SELECT_SETTING_COUNT)> selects_{};
+#endif
+  // The body of each settings object at its last valid read, to check a read before a write against it
+  std::array<std::array<uint8_t, MAX_WRITE_SIZE>, static_cast<size_t>(Setting::SETTING_COUNT)> last_body_{};
+  std::array<WriteRequest, WRITE_QUEUE_SIZE> queue_{};
+  WriteRequest job_{};
+  std::array<uint8_t, MAX_WRITE_SIZE> job_body_{};  // the object as written
+  uint16_t last_known_{0};                          // bit per Setting: last_body_ holds a read
+  uint16_t job_type_{0};
+  uint8_t job_version_{0};
+  uint8_t job_size_{0};
+  uint8_t queued_{0};
+  JobPhase phase_{JobPhase::JOB_PHASE_NONE};
+  bool reply_failed_{false};  // the last reply was an error, so a late answer may still come
+  // The status warning is a failed write; it clears at the first valid settings read of a later poll cycle
+  WriteWarning write_warning_{WriteWarning::WRITE_WARNING_NONE};
+#endif
 };
 
 }  // namespace esphome::grundfos_alpha

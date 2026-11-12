@@ -37,3 +37,11 @@ text_sensor:
       name: Pump operating mode in effect
     control_source:
       name: Pump control source
+
+select:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    control_mode:
+      name: Pump control mode
+    operating_mode:
+      name: Pump operating mode

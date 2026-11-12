@@ -47,9 +47,12 @@ static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
 
 static constexpr uint8_t SETTINGS_OBJECT = 86;
 // Settings objects of profile 52_1_0, in the order of Setting (Grundfos GO app data; not yet read from a pump).
-// Type 0x012F operation status: control_source, operation_mode, control_mode, set_point (float).
+// Type 0x012F operation status: control_source, operation_mode, control_mode, set_point (float). Type 0x0154
+// operation mode configuration: byte 1 local_operation_mode.
 static constexpr SettingLayouts ALPHA3_SETTINGS = {{
     {8, 0x012F, 1, 7},
+    {10, 0x012F, 1, 7},
+    {100, 0x0154, 1, 4},
 }};
 
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
@@ -63,10 +66,10 @@ static float read_float(const uint8_t *at) { return bit_cast<float>(encode_uint3
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
 static constexpr uint8_t WARNED_SETTING = 0x40;
 
-#ifdef USE_TEXT_SENSOR
-// Byte offsets in a type 0x012F body
-static constexpr uint8_t OFFSET_SOURCE = 0;
-static constexpr uint8_t OFFSET_OPERATION_MODE = 1;
+#if defined(USE_TEXT_SENSOR) || defined(USE_GRUNDFOS_ALPHA_WRITE)
+// Byte offsets in the bodies
+static constexpr uint8_t OFFSET_SOURCE = 0;          // 0x012F control_source
+static constexpr uint8_t OFFSET_OPERATION_MODE = 1;  // 0x012F operation_mode, 0x0154 local_operation_mode
 
 /// The position of value in values, or values.size() when it is not there.
 static size_t index_of(std::span<const uint8_t> values, uint8_t value) {
@@ -75,7 +78,20 @@ static size_t index_of(std::span<const uint8_t> values, uint8_t value) {
     i++;
   return i;
 }
+#endif
 
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+static constexpr uint8_t OFFSET_CONTROL_MODE = 2;  // 0x012F control_mode
+// The values the app offers for 86/10 byte 2 and 86/100 byte 1, in the order of the select options. Stop (1) stays
+// after a loss of power or not; that is not tested yet.
+static constexpr uint8_t CONTROL_MODES[] = {0, 1, 2, 13, 14, 15};
+static constexpr uint8_t OPERATING_MODES[] = {0, 1, 2, 3};
+// Status byte of a class 10 SET acknowledgement
+static constexpr uint8_t SET_STATUS_BUSY = 2;
+static constexpr uint8_t SET_STATUS_FAILED = 4;
+#endif
+
+#ifdef USE_TEXT_SENSOR
 // OperationMode and ControlSource of profile 52_1_0; the last name is the fallback
 PROGMEM_STRING_TABLE(OperatingModeNames, "Normal", "Stop", "Min", "Max", "User defined", "Forced start", "No command",
                      "Hand", "Unknown");
@@ -116,6 +132,14 @@ void GrundfosAlpha::update() {
       this->current_ = REQUEST_IDENTITY;
     return;
   }
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  // A new poll cycle: a late answer to an old request can no longer come
+  this->reply_failed_ = false;
+  if (this->write_warning_ == WriteWarning::WRITE_WARNING_SET)
+    this->write_warning_ = WriteWarning::WRITE_WARNING_CLEAR_ON_READ;
+  if (this->start_job_())
+    return;
+#endif
   this->request_from_(0);
 }
 
@@ -125,6 +149,13 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   // on_disconnected() follows and marks the values unknown
   if (response.error == GenibusError::GENIBUS_ERROR_DISCONNECTED)
     return;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  this->reply_failed_ = response.error != GenibusError::GENIBUS_ERROR_NONE;
+  if (current == REQUEST_WRITE) {
+    this->continue_job_(response);
+    return;
+  }
+#endif
   if (current == REQUEST_IDENTITY) {
     if (this->identify_(response))
       this->request_from_(0);
@@ -142,6 +173,11 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   } else {
     return;
   }
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  // A write goes before the rest of the poll chain, but not right after a failed reply
+  if (!this->reply_failed_ && this->start_job_())
+    return;
+#endif
   this->request_from_(current + 1);
 }
 
@@ -153,6 +189,18 @@ void GrundfosAlpha::on_disconnected() {
     if (text_sensor != nullptr && text_sensor->has_state())
       text_sensor->publish_state("");
   }
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  if (this->phase_ != JobPhase::JOB_PHASE_NONE)
+    this->end_job_(LOG_STR("connection lost"));
+  if (this->queued_ != 0) {
+    ESP_LOGW(TAG, "%u waiting writes dropped: connection lost", this->queued_);
+    this->queued_ = 0;
+    this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
+    this->status_set_warning(LOG_STR("Write failed"));
+  }
+  // The pump may change while away; a write waits for the next poll
+  this->last_known_ = 0;
 #endif
 }
 
@@ -289,6 +337,12 @@ bool GrundfosAlpha::wants_setting_(Setting setting) const {
   if (setting == Setting::SETTING_REALIZED)
     return this->operating_mode_text_sensor_ != nullptr || this->control_source_text_sensor_ != nullptr;
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
+  if (setting == Setting::SETTING_CONTROL_MODE && this->selects_[0] != nullptr)
+    return true;
+  if (setting == Setting::SETTING_OPERATING_MODE)
+    return this->selects_[1] != nullptr;
+#endif
   return false;
 }
 
@@ -319,6 +373,17 @@ bool GrundfosAlpha::decode_setting_(Setting setting, const genibus::GenibusRespo
 }
 
 void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> body) {
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  const size_t index = static_cast<size_t>(setting);
+  if (body.size() <= MAX_WRITE_SIZE) {
+    std::copy(body.begin(), body.end(), this->last_body_[index].begin());
+    this->last_known_ |= 1u << index;
+  }
+  if (this->write_warning_ == WriteWarning::WRITE_WARNING_CLEAR_ON_READ) {
+    this->write_warning_ = WriteWarning::WRITE_WARNING_NONE;
+    this->status_clear_warning();
+  }
+#endif
   switch (setting) {
     case Setting::SETTING_REALIZED:
 #ifdef USE_TEXT_SENSOR
@@ -329,9 +394,192 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
                                                         ControlSourceNames::LAST_INDEX));
 #endif
       break;
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
+    case Setting::SETTING_CONTROL_MODE:
+    case Setting::SETTING_OPERATING_MODE: {
+      const bool control = setting == Setting::SETTING_CONTROL_MODE;
+      select::Select *entity = this->selects_[control ? 0 : 1];
+      const std::span<const uint8_t> values = control ? std::span<const uint8_t>(CONTROL_MODES) : OPERATING_MODES;
+      const size_t option = index_of(values, body[control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE]);
+      if (entity != nullptr && option < values.size())
+        entity->publish_state(option);
+      break;
+    }
+#endif
     default:
       break;
   }
+}
+#endif
+
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+#ifdef USE_SELECT
+void GrundfosAlpha::write_select(SelectSetting setting, size_t index) {
+  const bool control = setting == SelectSetting::SELECT_SETTING_CONTROL_MODE;
+  const std::span<const uint8_t> values = control ? std::span<const uint8_t>(CONTROL_MODES) : OPERATING_MODES;
+  if (index >= values.size())
+    return;
+  this->enqueue_({control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
+                  control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index]},
+                 control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
+}
+#endif
+
+bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what) {
+  if (!this->parent_->is_connected() || this->model_ == nullptr || this->model_->settings == nullptr) {
+    ESP_LOGW(TAG, "%s not written: pump not connected or not supported", LOG_STR_ARG(what));
+    return false;
+  }
+  size_t slot = 0;
+  while (slot < this->queued_ && this->queue_[slot].setting != request.setting)
+    slot++;
+  if (slot < this->queued_) {
+    ESP_LOGV(TAG, "Replacing a waiting write");
+  } else if (this->queued_ == WRITE_QUEUE_SIZE) {
+    ESP_LOGW(TAG, "%s not written: too many waiting writes", LOG_STR_ARG(what));
+    return false;
+  } else {
+    this->queued_++;
+  }
+  this->queue_[slot] = request;
+  // Not right after a failed reply: its late answer could be taken for the read of the write
+  if (!this->reply_failed_ && !this->parent_->is_busy(this))
+    this->start_job_();
+  return true;
+}
+
+bool GrundfosAlpha::start_job_() {
+  if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->queued_ == 0 || this->model_ == nullptr ||
+      this->model_->settings == nullptr)
+    return false;
+  this->job_ = this->queue_[0];
+  std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
+  this->queued_--;
+  this->phase_ = JobPhase::JOB_PHASE_READ;
+  if (!this->request_object_(SETTINGS_OBJECT, this->job_sub_id_())) {
+    this->end_job_(LOG_STR("not sent"));
+    return false;
+  }
+  this->current_ = REQUEST_WRITE;
+  return true;
+}
+
+uint16_t GrundfosAlpha::job_sub_id_() const {
+  return (*this->model_->settings)[static_cast<size_t>(this->job_.setting)].sub_id;
+}
+
+void GrundfosAlpha::apply_job_() { this->job_body_[this->job_.offset] = this->job_.byte_value; }
+
+bool GrundfosAlpha::same_outside_value_(std::span<const uint8_t> body) const {
+  for (size_t i = 0; i < body.size(); i++) {
+    if (i != this->job_.offset && body[i] != this->job_body_[i])
+      return false;
+  }
+  return true;
+}
+
+void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
+  const size_t index = static_cast<size_t>(this->job_.setting);
+  genibus::DataObject object{};
+  switch (this->phase_) {
+    case JobPhase::JOB_PHASE_READ: {
+      if (!this->parse_setting_(this->job_.setting, response, object) || object.body.size() > MAX_WRITE_SIZE) {
+        this->end_job_(LOG_STR("no valid read"));
+        break;
+      }
+      // A late reply to another object of the same type must not be written back: the read has to match the
+      // last poll of this object outside the value that changes
+      std::copy(this->last_body_[index].begin(), this->last_body_[index].end(), this->job_body_.begin());
+      if ((this->last_known_ & (1u << index)) == 0 || !this->same_outside_value_(object.body)) {
+        this->end_job_(LOG_STR("object differs from the last read"));
+        break;
+      }
+      std::copy(object.body.begin(), object.body.end(), this->job_body_.begin());
+      this->job_size_ = static_cast<uint8_t>(object.body.size());
+      this->apply_job_();
+      if (std::equal(object.body.begin(), object.body.end(), this->job_body_.begin())) {
+        // Already set: spare the pump's memory a write
+        this->publish_setting_(this->job_.setting, object.body);
+        this->end_job_(nullptr);
+        break;
+      }
+      this->job_type_ = object.type;
+      this->job_version_ = object.version;
+      this->phase_ = JobPhase::JOB_PHASE_WRITE;
+      if (!this->set_object_(SETTINGS_OBJECT, this->job_sub_id_(), this->job_type_, this->job_version_,
+                             {this->job_body_.data(), this->job_size_})) {
+        this->end_job_(LOG_STR("not sent"));
+        break;
+      }
+      this->current_ = REQUEST_WRITE;
+      return;
+    }
+    case JobPhase::JOB_PHASE_WRITE: {
+      // Acknowledgement: class 10, ACK 0, one status byte
+      genibus::ApduReader reader(response.apdus);
+      genibus::Apdu apdu{};
+      if (response.error != GenibusError::GENIBUS_ERROR_NONE) {
+        this->end_job_(LOG_STR("no reply"));
+        break;
+      }
+      if (!reader.next(apdu) || apdu.data_class != genibus::CLASS_DATA_OBJECT || apdu.ack != 0 ||
+          apdu.data.size() != 1) {
+        ESP_LOGV(TAG, "Write reply: class %u, ACK %u, %u bytes", apdu.data_class, apdu.ack,
+                 static_cast<unsigned>(apdu.data.size()));
+        this->end_job_(LOG_STR("refused"));
+        break;
+      }
+      if (apdu.data[0] != 0) {
+        ESP_LOGV(TAG, "Write status %u", apdu.data[0]);
+        this->end_job_(apdu.data[0] == SET_STATUS_BUSY     ? LOG_STR("pump busy")
+                       : apdu.data[0] == SET_STATUS_FAILED ? LOG_STR("operation failed")
+                                                           : LOG_STR("refused"));
+        break;
+      }
+      // The acknowledgement alone proves nothing; read the object back
+      this->phase_ = JobPhase::JOB_PHASE_VERIFY;
+      if (!this->request_object_(SETTINGS_OBJECT, this->job_sub_id_())) {
+        this->end_job_(LOG_STR("read-back not sent"));
+        break;
+      }
+      this->current_ = REQUEST_WRITE;
+      return;
+    }
+    case JobPhase::JOB_PHASE_VERIFY: {
+      if (!this->parse_setting_(this->job_.setting, response, object)) {
+        this->end_job_(LOG_STR("no valid read-back"));
+        break;
+      }
+      this->publish_setting_(this->job_.setting, object.body);
+      const bool same =
+          this->same_outside_value_(object.body) && object.body[this->job_.offset] == this->job_.byte_value;
+      this->end_job_(same ? nullptr : LOG_STR("the pump kept another value"));
+      break;
+    }
+    default:
+      return;
+  }
+  if (!this->parent_->is_connected())
+    return;
+  // The next waiting write, then a fresh read of what the entities show
+  if (!this->reply_failed_ && this->start_job_())
+    return;
+  this->request_from_(this->model_->objects.size());
+}
+
+void GrundfosAlpha::end_job_(const LogString *failure) {
+  this->phase_ = JobPhase::JOB_PHASE_NONE;
+  if (failure == nullptr) {
+    ESP_LOGV(TAG, "Write done");
+    if (this->write_warning_ != WriteWarning::WRITE_WARNING_NONE) {
+      this->write_warning_ = WriteWarning::WRITE_WARNING_NONE;
+      this->status_clear_warning();
+    }
+    return;
+  }
+  ESP_LOGW(TAG, "Write to 86/%u failed: %s", this->job_sub_id_(), LOG_STR_ARG(failure));
+  this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
+  this->status_set_warning(LOG_STR("Write failed"));
 }
 #endif
 
