@@ -1,7 +1,12 @@
 import esphome.codegen as cg
 from esphome.components import switch
 import esphome.config_validation as cv
-from esphome.const import ENTITY_CATEGORY_CONFIG
+from esphome.const import (
+    CONF_INITIAL_STATE,
+    CONF_RESTORE_MODE,
+    CONF_RESTORE_STATE,
+    ENTITY_CATEGORY_CONFIG,
+)
 from esphome.types import ConfigType
 
 from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
@@ -10,7 +15,6 @@ DEPENDENCIES = ["grundfos_alpha"]
 
 CONF_AUTOMATIC_NIGHT_SETBACK = "automatic_night_setback"
 
-# The pump keeps the setting, so there is nothing to restore
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_GRUNDFOS_ALPHA_ID): cv.use_id(GrundfosAlpha),
@@ -19,6 +23,14 @@ CONFIG_SCHEMA = cv.Schema(
             default_restore_mode="DISABLED",
             entity_category=ENTITY_CATEGORY_CONFIG,
             icon="mdi:weather-night",
+        ).extend(
+            {
+                # The pump keeps the setting, and nothing is written before the pump is connected
+                cv.Optional(key): cv.invalid(
+                    "Not supported: the switch shows the setting read from the pump"
+                )
+                for key in (CONF_RESTORE_MODE, CONF_RESTORE_STATE, CONF_INITIAL_STATE)
+            }
         ),
     }
 )

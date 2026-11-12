@@ -14,6 +14,7 @@ ESPHOME_LOG_TAG(TAG, "grundfos_alpha");
 using genibus::GenibusError;
 
 static constexpr uint8_t CLASS_MEASURED_DATA = 2;
+static constexpr uint8_t CLASS_REFERENCE = 5;
 // Class 2 GET of unit_family (148), unit_type (149) and unit_version (150)
 static constexpr uint8_t IDENTITY_REQUEST[] = {CLASS_MEASURED_DATA, 0x03, 148, 149, 150};
 // warned_ holds a bit per object index below these flags
@@ -50,7 +51,8 @@ static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
     {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},
 };
 
-// Settings objects of profile 52_1_0, in the order of Setting (Grundfos GO app data; not yet read from a pump).
+// Settings objects of profile 52_1_0, in the order of Setting (Grundfos GO app data; the types, versions and sizes
+// match the replies of a real ALPHA3).
 // Type 0x012F operation status: control_source, operation_mode, control_mode, set_point (float). Type 0x0154
 // operation mode configuration: byte 1 local_operation_mode. Type 0x012D factory configuration: default, min, max
 // set point (floats), ... Type 0x012E user configuration: feedback_id (u16), local_set_point (float), PID values.
@@ -615,7 +617,7 @@ void GrundfosAlpha::send_command(Command command) {
 }
 
 void GrundfosAlpha::write_air_venting(bool on) {
-  this->enqueue_({Setting::SETTING_COUNT, 0, on, false, 0.0f, Command::COMMAND_NONE}, LOG_STR("Air venting"));
+  this->enqueue_({Setting::SETTING_COUNT, 0, on, false, 0.0f, Command::COMMAND_AIR_VENTING}, LOG_STR("Air venting"));
 }
 
 bool GrundfosAlpha::start_job_() {
@@ -630,10 +632,15 @@ bool GrundfosAlpha::start_job_() {
     this->queued_--;
     if (this->job_.setting == Setting::SETTING_COUNT) {
       this->phase_ = JobPhase::JOB_PHASE_COMMAND;
-      // The only class 5 value written is air venting
-      const bool sent = this->job_.command == Command::COMMAND_NONE
-                            ? this->set_reference_(REFERENCE_AIR_VENTING, this->job_.byte_value)
-                            : this->send_command_(static_cast<uint8_t>(this->job_.command));
+      bool sent;
+      if (this->job_.command == Command::COMMAND_AIR_VENTING) {
+        // Class 5 SET of one value; the only class 5 value written
+        const uint8_t apdu[] = {CLASS_REFERENCE, genibus::OPERATION_SET | 2, REFERENCE_AIR_VENTING,
+                                this->job_.byte_value};
+        sent = this->parent_->send(this, apdu);
+      } else {
+        sent = this->send_command_(static_cast<uint8_t>(this->job_.command));
+      }
       if (!sent) {
         this->end_job_(LOG_STR("not sent"));
         return false;
@@ -814,7 +821,7 @@ void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
       genibus::ApduReader reader(response.apdus);
       genibus::Apdu apdu{};
       const uint8_t data_class =
-          this->job_.command == Command::COMMAND_NONE ? genibus::CLASS_REFERENCE : genibus::CLASS_COMMAND;
+          this->job_.command == Command::COMMAND_AIR_VENTING ? CLASS_REFERENCE : genibus::CLASS_COMMAND;
       if (response.error != GenibusError::GENIBUS_ERROR_NONE) {
         this->end_job_(LOG_STR("no reply"));
       } else if (!reader.next(apdu) || apdu.data_class != data_class || apdu.ack != 0 || !apdu.data.empty()) {
@@ -861,7 +868,7 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
   if (this->job_.setting != Setting::SETTING_COUNT) {
     ESP_LOGW(TAG, "Write to %u/%u failed: %s", this->job_layout_().object, this->job_layout_().sub_id,
              LOG_STR_ARG(failure));
-  } else if (this->job_.command == Command::COMMAND_NONE) {
+  } else if (this->job_.command == Command::COMMAND_AIR_VENTING) {
     ESP_LOGW(TAG, "Air venting write failed: %s", LOG_STR_ARG(failure));
   } else {
     ESP_LOGW(TAG, "Command %u failed: %s", static_cast<uint8_t>(this->job_.command), LOG_STR_ARG(failure));

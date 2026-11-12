@@ -105,6 +105,8 @@ enum class Command : uint8_t {
   COMMAND_STOP = 5,
   COMMAND_START = 6,  // AUTO in the profile
   COMMAND_RESET_ALARM_LOG = 51,
+  // Not a class 3 ID: the class 5 write of air venting, byte_value 1 starts it, 0 stops it
+  COMMAND_AIR_VENTING = 0xFF,
 };
 
 // The largest settings object that is written (type 0x012E, 18 bytes)
@@ -115,7 +117,7 @@ static constexpr size_t WRITE_QUEUE_SIZE = 4;
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
 /// One write: change one byte or one big-endian float of a settings object, or send a command (setting is then
-/// SETTING_COUNT). With SETTING_COUNT and COMMAND_NONE, byte_value goes to the air venting reference value.
+/// SETTING_COUNT; COMMAND_AIR_VENTING is the class 5 air venting write).
 struct WriteRequest {
   Setting setting;
   uint8_t offset;  // of the value in the body
@@ -195,7 +197,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   void send_command(Command command);
-  /// Start or stop air venting; it runs the pump at high speed until it times out or is stopped.
+  /// Start or stop air venting, which runs the pump at high speed. The Grundfos GO app data give it a timeout (86/101,
+  /// 1800 s); that the pump ends it by itself is not confirmed on a pump, so stop it when done.
   void write_air_venting(bool on);
 #endif
 

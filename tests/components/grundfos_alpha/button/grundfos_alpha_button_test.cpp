@@ -81,6 +81,20 @@ TEST_F(CommandTest, AirVentingIsRefusedWithoutConnection) {
   EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
 }
 
+// The bus refuses the write when the link is gone before the bus has noticed; the warning comes at once, not only
+// when the bus reports the loss
+TEST_F(CommandTest, AirVentingNotSentIsWarned) {
+  this->read_selects_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->pump_.write_air_venting(true);
+  this->bus_.connected = false;
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  EXPECT_TRUE(this->pump_.status_has_warning());
+  this->run_();
+  EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
+}
+
 TEST_F(CommandTest, RefusedCommandIsWarned) {
   this->identify_();
   this->pump_.send_command(Command::COMMAND_STOP);
