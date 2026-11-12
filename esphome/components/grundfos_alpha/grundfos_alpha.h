@@ -17,6 +17,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
 #include "esphome/components/select/select.h"
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+#include "esphome/components/number/number.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -52,6 +55,12 @@ enum class Setting : uint8_t {
   SETTING_REALIZED,  // 86/8: the operating mode and control source in effect
   SETTING_CONTROL_MODE,
   SETTING_OPERATING_MODE,
+  SETTING_CONSTANT_PRESSURE_LIMITS,
+  SETTING_CONSTANT_PRESSURE,
+  SETTING_PROPORTIONAL_PRESSURE_LIMITS,
+  SETTING_PROPORTIONAL_PRESSURE,
+  SETTING_CONSTANT_SPEED_LIMITS,
+  SETTING_CONSTANT_SPEED,
   SETTING_COUNT,
 };
 
@@ -65,6 +74,12 @@ struct SettingLayout {
 using SettingLayouts = std::array<SettingLayout, static_cast<size_t>(Setting::SETTING_COUNT)>;
 
 enum class SelectSetting : uint8_t { SELECT_SETTING_CONTROL_MODE, SELECT_SETTING_OPERATING_MODE, SELECT_SETTING_COUNT };
+enum class NumberSetting : uint8_t {
+  NUMBER_SETTING_CONSTANT_PRESSURE,
+  NUMBER_SETTING_PROPORTIONAL_PRESSURE,
+  NUMBER_SETTING_CONSTANT_SPEED,
+  NUMBER_SETTING_COUNT,
+};
 
 enum class JobPhase : uint8_t {
   JOB_PHASE_NONE,
@@ -73,18 +88,20 @@ enum class JobPhase : uint8_t {
   JOB_PHASE_VERIFY,  // the object is read back
 };
 
-// The largest settings object that is written (type 0x012F, 7 bytes)
-static constexpr size_t MAX_WRITE_SIZE = 7;
+// The largest settings object that is written (type 0x012E, 18 bytes)
+static constexpr size_t MAX_WRITE_SIZE = 18;
 // Writes that wait while one runs
 static constexpr size_t WRITE_QUEUE_SIZE = 4;
 
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
-/// One write: change one byte of a settings object.
+/// One write: change one byte or one big-endian float of a settings object.
 struct WriteRequest {
   Setting setting;
   uint8_t offset;  // of the value in the body
   uint8_t byte_value;
+  bool is_float;
+  float float_value;
 };
 
 /// The objects read from a pump of one unit family, type and version; settings is null for a model without them.
@@ -132,6 +149,12 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   }
   void write_select(SelectSetting setting, size_t index);
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+  void set_number(NumberSetting setting, number::Number *entity) {
+    this->numbers_[static_cast<size_t>(setting)] = entity;
+  }
+  void write_number(NumberSetting setting, float value);
+#endif
 
  protected:
   bool identify_(const genibus::GenibusResponse &response);
@@ -159,6 +182,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   /// Whether body equals job_body_ outside the value the job changes.
   bool same_outside_value_(std::span<const uint8_t> body) const;
   uint16_t job_sub_id_() const;
+  /// Whether the pump is in the control mode the job's set point belongs to.
+  bool job_allowed_() const;
 #endif
   void publish_(Reading reading, float value);
   void publish_unknown_();
@@ -175,6 +200,12 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
 #ifdef USE_SELECT
   std::array<select::Select *, static_cast<size_t>(SelectSetting::SELECT_SETTING_COUNT)> selects_{};
+#endif
+#ifdef USE_NUMBER
+  std::array<number::Number *, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> numbers_{};
+  // The set point limits the pump reports, in Pa or rpm
+  std::array<float, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> min_{};
+  std::array<float, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> max_{};
 #endif
   // The body of each settings object at its last valid read, to check a read before a write against it
   std::array<std::array<uint8_t, MAX_WRITE_SIZE>, static_cast<size_t>(Setting::SETTING_COUNT)> last_body_{};

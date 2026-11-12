@@ -48,11 +48,18 @@ static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
 static constexpr uint8_t SETTINGS_OBJECT = 86;
 // Settings objects of profile 52_1_0, in the order of Setting (Grundfos GO app data; not yet read from a pump).
 // Type 0x012F operation status: control_source, operation_mode, control_mode, set_point (float). Type 0x0154
-// operation mode configuration: byte 1 local_operation_mode.
+// operation mode configuration: byte 1 local_operation_mode. Type 0x012D factory configuration: default, min, max
+// set point (floats), ... Type 0x012E user configuration: feedback_id (u16), local_set_point (float), PID values.
 static constexpr SettingLayouts ALPHA3_SETTINGS = {{
     {8, 0x012F, 1, 7},
     {10, 0x012F, 1, 7},
     {100, 0x0154, 1, 4},
+    {15, 0x012D, 1, 28},
+    {16, 0x012E, 1, 18},
+    {17, 0x012D, 1, 28},
+    {18, 0x012E, 1, 18},
+    {13, 0x012D, 1, 28},
+    {14, 0x012E, 1, 18},
 }};
 
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
@@ -89,6 +96,27 @@ static constexpr uint8_t OPERATING_MODES[] = {0, 1, 2, 3};
 // Status byte of a class 10 SET acknowledgement
 static constexpr uint8_t SET_STATUS_BUSY = 2;
 static constexpr uint8_t SET_STATUS_FAILED = 4;
+#endif
+
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+static constexpr uint8_t OFFSET_SET_POINT = 2;  // 0x012E local_set_point
+static constexpr uint8_t OFFSET_MIN = 4;        // 0x012D minimum set point
+static constexpr uint8_t OFFSET_MAX = 8;        // 0x012D maximum set point
+// A set point the pump reads back within this many Pa or rpm counts as written
+static constexpr float SET_POINT_TOLERANCE = 1.0f;
+
+/// The settings objects behind a set point entity, its unit in Pa or rpm, and the control mode it belongs to.
+struct NumberLayout {
+  Setting value;
+  Setting limits;
+  float raw_per_unit;
+  uint8_t control_mode;
+};
+static constexpr NumberLayout NUMBERS[] = {
+    {Setting::SETTING_CONSTANT_PRESSURE, Setting::SETTING_CONSTANT_PRESSURE_LIMITS, PASCAL_PER_METER, 0},
+    {Setting::SETTING_PROPORTIONAL_PRESSURE, Setting::SETTING_PROPORTIONAL_PRESSURE_LIMITS, PASCAL_PER_METER, 1},
+    {Setting::SETTING_CONSTANT_SPEED, Setting::SETTING_CONSTANT_SPEED_LIMITS, 1.0f, 2},
+};
 #endif
 
 #ifdef USE_TEXT_SENSOR
@@ -201,6 +229,12 @@ void GrundfosAlpha::on_disconnected() {
   }
   // The pump may change while away; a write waits for the next poll
   this->last_known_ = 0;
+#ifdef USE_NUMBER
+  for (auto *entity : this->numbers_) {
+    if (entity != nullptr && entity->has_state())
+      entity->publish_state(NAN);
+  }
+#endif
 #endif
 }
 
@@ -340,8 +374,18 @@ bool GrundfosAlpha::wants_setting_(Setting setting) const {
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
   if (setting == Setting::SETTING_CONTROL_MODE && this->selects_[0] != nullptr)
     return true;
-  if (setting == Setting::SETTING_OPERATING_MODE)
-    return this->selects_[1] != nullptr;
+  if (setting == Setting::SETTING_OPERATING_MODE && this->selects_[1] != nullptr)
+    return true;
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+  for (size_t i = 0; i < std::size(NUMBERS); i++) {
+    if (this->numbers_[i] == nullptr)
+      continue;
+    // A set point is written only in its control mode, so that is read too; the limits do not change
+    if (setting == Setting::SETTING_CONTROL_MODE || NUMBERS[i].value == setting ||
+        (NUMBERS[i].limits == setting && (this->last_known_ & (1u << static_cast<size_t>(setting))) == 0))
+      return true;
+  }
 #endif
   return false;
 }
@@ -375,10 +419,9 @@ bool GrundfosAlpha::decode_setting_(Setting setting, const genibus::GenibusRespo
 void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> body) {
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   const size_t index = static_cast<size_t>(setting);
-  if (body.size() <= MAX_WRITE_SIZE) {
+  if (body.size() <= MAX_WRITE_SIZE)
     std::copy(body.begin(), body.end(), this->last_body_[index].begin());
-    this->last_known_ |= 1u << index;
-  }
+  this->last_known_ |= 1u << index;
   if (this->write_warning_ == WriteWarning::WRITE_WARNING_CLEAR_ON_READ) {
     this->write_warning_ = WriteWarning::WRITE_WARNING_NONE;
     this->status_clear_warning();
@@ -409,10 +452,41 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
     default:
       break;
   }
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+  for (size_t i = 0; i < std::size(NUMBERS); i++) {
+    if (NUMBERS[i].value == setting) {
+      PUBLISH_STATE(this->numbers_[i], read_float(&body[OFFSET_SET_POINT]) / NUMBERS[i].raw_per_unit);
+    } else if (NUMBERS[i].limits == setting) {
+      this->min_[i] = read_float(&body[OFFSET_MIN]);
+      this->max_[i] = read_float(&body[OFFSET_MAX]);
+    }
+  }
+#endif
 }
 #endif
 
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
+#ifdef USE_NUMBER
+void GrundfosAlpha::write_number(NumberSetting setting, float value) {
+  const size_t i = static_cast<size_t>(setting);
+  if (i >= std::size(NUMBERS))
+    return;
+  const float raw = value * NUMBERS[i].raw_per_unit;
+  if ((this->last_known_ & (1u << static_cast<size_t>(NUMBERS[i].limits))) == 0 || std::isnan(this->min_[i]) ||
+      std::isnan(this->max_[i])) {
+    ESP_LOGW(TAG, "Set point not written: no limits from the pump");
+    return;
+  }
+  // Also refuses NaN
+  if (!(raw >= this->min_[i] && raw <= this->max_[i])) {
+    ESP_LOGW(TAG, "Set point %.2f not written: outside %.2f to %.2f", value, this->min_[i] / NUMBERS[i].raw_per_unit,
+             this->max_[i] / NUMBERS[i].raw_per_unit);
+    return;
+  }
+  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 0, true, raw}, LOG_STR("Set point"));
+}
+#endif
+
 #ifdef USE_SELECT
 void GrundfosAlpha::write_select(SelectSetting setting, size_t index) {
   const bool control = setting == SelectSetting::SELECT_SETTING_CONTROL_MODE;
@@ -420,7 +494,7 @@ void GrundfosAlpha::write_select(SelectSetting setting, size_t index) {
   if (index >= values.size())
     return;
   this->enqueue_({control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
-                  control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index]},
+                  control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index], false, 0.0f},
                  control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
 }
 #endif
@@ -449,18 +523,37 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
 }
 
 bool GrundfosAlpha::start_job_() {
-  if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->queued_ == 0 || this->model_ == nullptr ||
-      this->model_->settings == nullptr)
+  if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->model_ == nullptr || this->model_->settings == nullptr)
     return false;
-  this->job_ = this->queue_[0];
-  std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
-  this->queued_--;
-  this->phase_ = JobPhase::JOB_PHASE_READ;
-  if (!this->request_object_(SETTINGS_OBJECT, this->job_sub_id_())) {
-    this->end_job_(LOG_STR("not sent"));
-    return false;
+  while (this->queued_ != 0) {
+    this->job_ = this->queue_[0];
+    std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
+    this->queued_--;
+    this->phase_ = JobPhase::JOB_PHASE_READ;
+    // Checked now, not when queued: a control mode written just before counts
+    if (!this->job_allowed_()) {
+      this->end_job_(LOG_STR("not in the control mode of this set point"));
+      continue;
+    }
+    if (!this->request_object_(SETTINGS_OBJECT, this->job_sub_id_())) {
+      this->end_job_(LOG_STR("not sent"));
+      return false;
+    }
+    this->current_ = REQUEST_WRITE;
+    return true;
   }
-  this->current_ = REQUEST_WRITE;
+  return false;
+}
+
+bool GrundfosAlpha::job_allowed_() const {
+#ifdef USE_NUMBER
+  constexpr size_t control_mode = static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
+  for (const auto &layout : NUMBERS) {
+    if (layout.value == this->job_.setting)
+      return (this->last_known_ & (1u << control_mode)) != 0 &&
+             this->last_body_[control_mode][OFFSET_CONTROL_MODE] == layout.control_mode;
+  }
+#endif
   return true;
 }
 
@@ -468,11 +561,18 @@ uint16_t GrundfosAlpha::job_sub_id_() const {
   return (*this->model_->settings)[static_cast<size_t>(this->job_.setting)].sub_id;
 }
 
-void GrundfosAlpha::apply_job_() { this->job_body_[this->job_.offset] = this->job_.byte_value; }
+void GrundfosAlpha::apply_job_() {
+  if (this->job_.is_float) {
+    put_be32(&this->job_body_[this->job_.offset], bit_cast<uint32_t>(this->job_.float_value));
+  } else {
+    this->job_body_[this->job_.offset] = this->job_.byte_value;
+  }
+}
 
 bool GrundfosAlpha::same_outside_value_(std::span<const uint8_t> body) const {
+  const size_t width = this->job_.is_float ? 4 : 1;
   for (size_t i = 0; i < body.size(); i++) {
-    if (i != this->job_.offset && body[i] != this->job_body_[i])
+    if ((i < this->job_.offset || i >= this->job_.offset + width) && body[i] != this->job_body_[i])
       return false;
   }
   return true;
@@ -551,8 +651,13 @@ void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
         break;
       }
       this->publish_setting_(this->job_.setting, object.body);
-      const bool same =
-          this->same_outside_value_(object.body) && object.body[this->job_.offset] == this->job_.byte_value;
+      bool value_ok = object.body[this->job_.offset] == this->job_.byte_value;
+#ifdef USE_NUMBER
+      if (this->job_.is_float)
+        value_ok =
+            std::fabs(read_float(&object.body[this->job_.offset]) - this->job_.float_value) <= SET_POINT_TOLERANCE;
+#endif
+      const bool same = this->same_outside_value_(object.body) && value_ok;
       this->end_job_(same ? nullptr : LOG_STR("the pump kept another value"));
       break;
     }
