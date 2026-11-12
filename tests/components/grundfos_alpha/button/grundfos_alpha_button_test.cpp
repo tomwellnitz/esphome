@@ -34,6 +34,17 @@ TEST_F(CommandTest, RefusedCommandIsWarned) {
   EXPECT_TRUE(this->pump_.status_has_warning());
 }
 
+// With only buttons no settings are polled; the warning clears with the next poll cycle
+TEST_F(CommandTest, WarningClearsWithoutSettingsToRead) {
+  this->identify_();
+  this->pump_.send_command(Command::COMMAND_STOP);
+  ASSERT_EQ(this->next_request_(), FRAME_COMMAND_5);
+  this->reply_(REPLY_COMMAND_ACK_ILLEGAL);
+  ASSERT_TRUE(this->pump_.status_has_warning());
+  this->pump_.update();
+  EXPECT_FALSE(this->pump_.status_has_warning());
+}
+
 TEST_F(CommandTest, CommandReplyWithDataIsWarned) {
   this->identify_();
   this->pump_.send_command(Command::COMMAND_START);

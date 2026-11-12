@@ -15,11 +15,11 @@ Command = grundfos_alpha_ns.enum("Command", is_class=True)
 
 # The class 3 commands the Grundfos GO app sends to an ALPHA3. Whether a stop lasts through a loss of power is not
 # tested yet.
-# key: (command, icon)
+# key: icon
 _BUTTONS = {
-    CONF_START: (Command.COMMAND_START, "mdi:play"),
-    CONF_STOP: (Command.COMMAND_STOP, "mdi:stop"),
-    CONF_RESET_ALARM: (Command.COMMAND_RESET_ALARM, "mdi:alarm-off"),
+    CONF_START: "mdi:play",
+    CONF_STOP: "mdi:stop",
+    CONF_RESET_ALARM: "mdi:alarm-off",
 }
 
 CONFIG_SCHEMA = cv.Schema(
@@ -27,7 +27,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.GenerateID(CONF_GRUNDFOS_ALPHA_ID): cv.use_id(GrundfosAlpha),
         **{
             cv.Optional(key): button.button_schema(button.ApplyButton, icon=icon)
-            for key, (_, icon) in _BUTTONS.items()
+            for key, icon in _BUTTONS.items()
         },
     }
 )
@@ -38,5 +38,17 @@ async def to_code(config: ConfigType) -> None:
     cg.add_define("USE_GRUNDFOS_ALPHA_SETTINGS")
     cg.add_define("USE_GRUNDFOS_ALPHA_WRITE")
     buttons = button.sub_buttons(config, parent=hub)
-    for key, (command, _) in _BUTTONS.items():
-        await buttons(key, None, apply=f"send_command({command})")
+    # The hub keeps them only for its config dump
+    await buttons(
+        CONF_START,
+        hub.set_start_button,
+        apply=f"send_command({Command.COMMAND_START})",
+    )
+    await buttons(
+        CONF_STOP, hub.set_stop_button, apply=f"send_command({Command.COMMAND_STOP})"
+    )
+    await buttons(
+        CONF_RESET_ALARM,
+        hub.set_reset_alarm_button,
+        apply=f"send_command({Command.COMMAND_RESET_ALARM})",
+    )

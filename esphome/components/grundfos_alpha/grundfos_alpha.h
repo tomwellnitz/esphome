@@ -20,6 +20,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
 #include "esphome/components/number/number.h"
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
+#include "esphome/components/button/button.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -147,6 +150,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   SUB_TEXT_SENSOR(operating_mode)
   SUB_TEXT_SENSOR(control_source)
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
+  SUB_BUTTON(start)
+  SUB_BUTTON(stop)
+  SUB_BUTTON(reset_alarm)
 #endif
 
  public:

@@ -154,6 +154,11 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "Proportional pressure set point", this->numbers_[1]);
   LOG_NUMBER("  ", "Constant speed set point", this->numbers_[2]);
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
+  LOG_BUTTON("  ", "Start", this->start_button_);
+  LOG_BUTTON("  ", "Stop", this->stop_button_);
+  LOG_BUTTON("  ", "Reset alarm", this->reset_alarm_button_);
+#endif
 }
 
 void GrundfosAlpha::update() {
@@ -605,6 +610,8 @@ bool GrundfosAlpha::job_allowed_() const {
 }
 
 bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
+  if (request.setting == Setting::SETTING_COUNT)
+    return true;  // a command reads nothing first
   uint16_t needed = 1u << static_cast<size_t>(request.setting);
 #ifdef USE_NUMBER
   // A set point also needs the control mode
