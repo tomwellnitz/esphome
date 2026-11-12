@@ -16,6 +16,8 @@ namespace esphome::genibus {
 // The APDUs of one request. The largest planned one is a class 10 SET of an 18 byte object (86/14, 86/16, 86/18):
 // 2 + 9 + 18 = 29 bytes.
 static constexpr size_t MAX_REQUEST_SIZE = 32;
+// The largest object body a class 10 SET fits into one request
+static constexpr size_t MAX_SET_BODY_SIZE = MAX_REQUEST_SIZE - 2 - SET_OBJECT_HEADER_SIZE;
 
 enum class GenibusError : uint8_t {
   GENIBUS_ERROR_NONE,
@@ -121,6 +123,11 @@ class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
 
  protected:
   bool request_object_(uint8_t object, uint16_t sub_id);
+  /// Send a class 10 SET of object/sub_id; false, sending nothing, when the body is empty or longer than
+  /// MAX_SET_BODY_SIZE, or when send() refuses it.
+  bool set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version, std::span<const uint8_t> body);
+  /// Send one class 3 command.
+  bool send_command_(uint8_t command);
 
   uint8_t address_{0};
 };
