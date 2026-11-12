@@ -44,9 +44,8 @@ def genibus_device_schema(default_address: int) -> cv.Schema:
 _register_device = cg.slot_list("GENIBUS_DEVICE_COUNT", "register_device", DOMAIN)
 
 
-async def register_genibus_bus(var: MockObj, config: ConfigType) -> None:
-    """Register a transport created with genibus_bus_schema()."""
-    await cg.register_component(var, config)
+def apply_genibus_bus_config(var: MockObj, config: ConfigType) -> None:
+    """Apply the settings of genibus_bus_schema() to a transport; the transport registers itself as a component."""
     cg.add(var.set_master_address(config[CONF_MASTER_ADDRESS]))
 
 
