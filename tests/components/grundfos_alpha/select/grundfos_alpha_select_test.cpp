@@ -132,10 +132,22 @@ TEST_F(SelectTest, TimeoutOfTheWriteEndsIt) {
   this->write_curve_until_set_();
   this->run_(TIMEOUT_MS);
   EXPECT_TRUE(this->pump_.status_has_warning());
-  // No read-back; after the quiet period the refresh reads the settings
+  // No read-back and no refresh: a late answer may still come; the next update() goes on
+  this->run_(QUIET_MS);
+  EXPECT_EQ(this->bus_.written.back(), FRAME_SET_CONTROL_MODE_CURVE);
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_GET_86_10);
+}
+
+TEST_F(SelectTest, TimeoutOfTheReadEndsTheWriteWithoutChaining) {
+  this->read_selects_();
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->run_(TIMEOUT_MS);
+  EXPECT_TRUE(this->pump_.status_has_warning());
   this->run_(QUIET_MS);
   EXPECT_EQ(this->bus_.written.back(), FRAME_GET_86_10);
-  EXPECT_EQ(std::count(this->bus_.written.begin(), this->bus_.written.end(), FRAME_SET_CONTROL_MODE_CURVE), 1);
+  EXPECT_FALSE(this->wrote_(FRAME_SET_CONTROL_MODE_CURVE));
 }
 
 // A failed reply may still be answered late; a write waits for the next clean reply or update()
@@ -238,18 +250,39 @@ TEST_F(SelectTest, NoWriteWhileDisconnected) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
-TEST_F(SelectTest, NoWriteBeforeTheObjectWasPolledAfterReconnect) {
+TEST_F(SelectTest, WriteWaitsUntilTheObjectWasPolledAfterReconnect) {
   this->read_selects_();
   this->bus_.lose_connection();
   this->bus_.establish_connection();
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // the poll after connecting is on the wire
   this->pump_.write_select(OPERATING_MODE, MAX);
   this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  // 86/100 was not polled since the connection came back
+  // 86/100 was not polled since the connection came back: the poll first, then the write
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_NORMAL);
-  EXPECT_TRUE(this->pump_.status_has_warning());
-  EXPECT_FALSE(this->wrote_(FRAME_SET_OPERATING_MODE_MAX));
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  EXPECT_EQ(this->next_request_(), FRAME_SET_OPERATING_MODE_MAX);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+}
+
+TEST_F(SelectTest, WriteWaitsWhenTheFirstPollFailed) {
+  this->use_selects_();
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  this->run_(TIMEOUT_MS);  // the first poll of 86/10 times out
+  this->run_(QUIET_MS);
+  ASSERT_EQ(this->bus_.written.back(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // now the write
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  EXPECT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);
 }
 
 TEST_F(SelectTest, UnsupportedModelOffersNoWrite) {

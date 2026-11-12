@@ -145,6 +145,10 @@ void GrundfosAlpha::dump_config() {
   LOG_TEXT_SENSOR("  ", "Operating mode", this->operating_mode_text_sensor_);
   LOG_TEXT_SENSOR("  ", "Control source", this->control_source_text_sensor_);
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
+  LOG_SELECT("  ", "Control mode", this->selects_[0]);
+  LOG_SELECT("  ", "Operating mode", this->selects_[1]);
+#endif
 }
 
 void GrundfosAlpha::update() {
@@ -163,8 +167,14 @@ void GrundfosAlpha::update() {
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   // A new poll cycle: a late answer to an old request can no longer come
   this->reply_failed_ = false;
-  if (this->write_warning_ == WriteWarning::WRITE_WARNING_SET)
+  if (this->write_warning_ == WriteWarning::WRITE_WARNING_SET) {
+    // The first valid settings read of this cycle clears it; with no settings to read, the new cycle does
     this->write_warning_ = WriteWarning::WRITE_WARNING_CLEAR_ON_READ;
+    if (!this->polls_settings_()) {
+      this->write_warning_ = WriteWarning::WRITE_WARNING_NONE;
+      this->status_clear_warning();
+    }
+  }
   if (this->start_job_())
     return;
 #endif
@@ -541,6 +551,9 @@ bool GrundfosAlpha::start_job_() {
   if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->model_ == nullptr || this->model_->settings == nullptr)
     return false;
   while (this->queued_ != 0) {
+    // A write waits until its object was polled; the read before the write is checked against that poll
+    if (!this->job_ready_(this->queue_[0]))
+      return false;
     this->job_ = this->queue_[0];
     std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
     this->queued_--;
@@ -579,6 +592,18 @@ bool GrundfosAlpha::job_allowed_() const {
   }
 #endif
   return true;
+}
+
+bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
+  return (this->last_known_ & (1u << static_cast<size_t>(request.setting))) != 0;
+}
+
+bool GrundfosAlpha::polls_settings_() const {
+  for (size_t i = 0; i < static_cast<size_t>(Setting::SETTING_COUNT); i++) {
+    if (this->wants_setting_(static_cast<Setting>(i)))
+      return true;
+  }
+  return false;
 }
 
 uint16_t GrundfosAlpha::job_sub_id_() const {
@@ -704,10 +729,11 @@ void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
     default:
       return;
   }
-  if (!this->parent_->is_connected())
+  // After a failed reply a late answer may still come; the next update() goes on
+  if (!this->parent_->is_connected() || this->reply_failed_)
     return;
   // The next waiting write, then a fresh read of what the entities show
-  if (!this->reply_failed_ && this->start_job_())
+  if (this->start_job_())
     return;
   this->request_from_(this->model_->objects.size());
 }

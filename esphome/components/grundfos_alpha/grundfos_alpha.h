@@ -190,6 +190,10 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool enqueue_(const WriteRequest &request, const LogString *what);
   /// Start the next waiting write; false when none was started.
   bool start_job_();
+  /// Whether the objects a write depends on were polled since the connection came up.
+  bool job_ready_(const WriteRequest &request) const;
+  /// Whether any settings object is polled.
+  bool polls_settings_() const;
   void continue_job_(const genibus::GenibusResponse &response);
   void end_job_(const LogString *failure);
   /// Set the requested value in job_body_.
