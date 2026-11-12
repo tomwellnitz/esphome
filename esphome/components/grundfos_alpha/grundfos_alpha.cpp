@@ -65,7 +65,14 @@ static constexpr SettingLayouts ALPHA3_SETTINGS = {{
     {18, 0x012E, 1, 18},
     {13, 0x012D, 1, 28},
     {14, 0x012E, 1, 18},
+    {19, 0x012D, 1, 28},
+    {20, 0x012E, 1, 18},
+    {21, 0x012D, 1, 28},
+    {22, 0x012E, 1, 18},
+    {23, 0x012D, 1, 28},
+    {24, 0x012E, 1, 18},
 }};
+static_assert(static_cast<size_t>(Setting::SETTING_COUNT) <= 16, "last_known_ has a bit per setting");
 
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
 // Add a model only after it was tested on a real pump
@@ -116,7 +123,10 @@ static constexpr uint8_t OFFSET_SET_POINT = 2;  // 0x012E local_set_point
 static constexpr uint8_t OFFSET_MIN = 4;        // 0x012D minimum set point
 static constexpr uint8_t OFFSET_MAX = 8;        // 0x012D maximum set point
 
-/// The settings objects behind a set point entity, its unit in Pa or rpm, and the control mode it belongs to.
+// A set point that is written in every control mode
+static constexpr uint8_t ANY_CONTROL_MODE = 0xFF;
+
+/// The settings objects behind a set point entity, its unit in Pa or rpm, and the control mode it is written in.
 struct NumberLayout {
   Setting value;
   Setting limits;
@@ -127,7 +137,14 @@ static constexpr NumberLayout NUMBERS[] = {
     {Setting::SETTING_CONSTANT_PRESSURE, Setting::SETTING_CONSTANT_PRESSURE_LIMITS, PASCAL_PER_METER, 0},
     {Setting::SETTING_PROPORTIONAL_PRESSURE, Setting::SETTING_PROPORTIONAL_PRESSURE_LIMITS, PASCAL_PER_METER, 1},
     {Setting::SETTING_CONSTANT_SPEED, Setting::SETTING_CONSTANT_SPEED_LIMITS, 1.0f, 2},
+    // The AutoAdapt set points (86/20, 86/22, 86/24): each control mode keeps its own value, and a write in another
+    // control mode leaves the pump's operation unchanged. 86/6 shows the value of the AutoAdapt mode in effect.
+    {Setting::SETTING_RADIATOR, Setting::SETTING_RADIATOR_LIMITS, PASCAL_PER_METER, ANY_CONTROL_MODE},
+    {Setting::SETTING_UNDERFLOOR, Setting::SETTING_UNDERFLOOR_LIMITS, PASCAL_PER_METER, ANY_CONTROL_MODE},
+    {Setting::SETTING_RADIATOR_AND_UNDERFLOOR, Setting::SETTING_RADIATOR_AND_UNDERFLOOR_LIMITS, PASCAL_PER_METER,
+     ANY_CONTROL_MODE},
 };
+static_assert(std::size(NUMBERS) == static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT));
 #endif
 
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
@@ -177,6 +194,9 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "Constant pressure set point", this->numbers_[0]);
   LOG_NUMBER("  ", "Proportional pressure set point", this->numbers_[1]);
   LOG_NUMBER("  ", "Constant speed set point", this->numbers_[2]);
+  LOG_NUMBER("  ", "Radiator set point", this->numbers_[3]);
+  LOG_NUMBER("  ", "Underfloor heating set point", this->numbers_[4]);
+  LOG_NUMBER("  ", "Radiator and underfloor heating set point", this->numbers_[5]);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
   LOG_BUTTON("  ", "Start", this->start_button_);
@@ -431,8 +451,9 @@ bool GrundfosAlpha::wants_setting_(Setting setting) const {
   for (size_t i = 0; i < std::size(NUMBERS); i++) {
     if (this->numbers_[i] == nullptr)
       continue;
-    // A set point is written only in its control mode, so that is read too; the limits do not change
-    if (setting == Setting::SETTING_CONTROL_MODE || NUMBERS[i].value == setting ||
+    // A set point with a control mode is written only in it, so that is read too; the limits do not change
+    if ((setting == Setting::SETTING_CONTROL_MODE && NUMBERS[i].control_mode != ANY_CONTROL_MODE) ||
+        NUMBERS[i].value == setting ||
         (NUMBERS[i].limits == setting && (this->last_known_ & (1u << static_cast<size_t>(setting))) == 0))
       return true;
   }
@@ -636,7 +657,7 @@ const LogString *GrundfosAlpha::job_refusal_() const {
 #ifdef USE_NUMBER
   // job_ready_() made sure the control mode was polled
   for (const auto &layout : NUMBERS) {
-    if (layout.value == this->job_.setting &&
+    if (layout.value == this->job_.setting && layout.control_mode != ANY_CONTROL_MODE &&
         this->last_body_[control_mode][OFFSET_CONTROL_MODE] != layout.control_mode)
       return LOG_STR("not in the control mode of this set point");
   }
@@ -652,9 +673,9 @@ bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
   if (request.setting == Setting::SETTING_OPERATING_MODE && this->wants_setting_(Setting::SETTING_CONTROL_MODE))
     needed |= 1u << static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
 #ifdef USE_NUMBER
-  // A set point also needs the control mode
+  // A set point with a control mode also needs the control mode
   for (const auto &layout : NUMBERS) {
-    if (layout.value == request.setting)
+    if (layout.value == request.setting && layout.control_mode != ANY_CONTROL_MODE)
       needed |= 1u << static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
   }
 #endif

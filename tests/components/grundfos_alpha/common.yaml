@@ -55,6 +55,12 @@ number:
       name: Pump proportional pressure set point
     constant_speed_setpoint:
       name: Pump constant speed set point
+    radiator_setpoint:
+      name: Pump radiator set point
+    underfloor_setpoint:
+      name: Pump underfloor heating set point
+    radiator_and_underfloor_setpoint:
+      name: Pump radiator and underfloor heating set point
 
 button:
   - platform: grundfos_alpha
