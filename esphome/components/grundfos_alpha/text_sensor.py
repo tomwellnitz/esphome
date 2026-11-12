@@ -17,7 +17,7 @@ CONF_PRODUCT_NUMBER = "product_number"
 CONF_SOFTWARE_VERSION = "software_version"
 
 # Read once per connection
-PRODUCT_TEXTS = {
+PRODUCT_TEXTS: dict[str, str] = {
     CONF_PRODUCT_NAME: "mdi:pump",
     CONF_PRODUCT_NUMBER: "mdi:barcode",
     CONF_SOFTWARE_VERSION: "mdi:chip",

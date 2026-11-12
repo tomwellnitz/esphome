@@ -140,6 +140,7 @@ struct Model {
   uint8_t name;  // index into ModelNames
   std::span<const ObjectLayout> objects;
   const SettingLayouts *settings;
+  bool info;  // whether the pump has the class 7 texts of TEXT_IDS and the event log in object 88
 };
 
 // Values of current_ besides a step of the poll chain
@@ -221,6 +222,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
                            genibus::DataObject &object);
   void decode_event_log_(const genibus::GenibusResponse &response);
   void decode_event_(const genibus::GenibusResponse &response);
+  /// Empty the last event sensor when it shows an event that may no longer be the latest.
+  void clear_last_event_();
   text_sensor::TextSensor *text_sensor_(InfoStep step) const;
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
@@ -259,11 +262,12 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool unsupported_{false};
   bool has_values_{false};
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
-  // The event the last event sensor shows; NO_EVENT_SHOWN before it shows one
+  // The latest event of the log the last event sensor was set for; NO_EVENT_SHOWN before it was set
   uint32_t event_shown_{NO_EVENT_SHOWN};
   uint16_t event_wanted_{0};  // the latest event of the log, whose entry is read next; 0 for none
   uint16_t event_sub_id_{0};  // the object 88 entry that holds it
   uint8_t texts_read_{0};     // a bit per text read since the connection came up
+  uint8_t texts_retried_{0};  // a bit per text whose reply did not fit once since the connection came up
   bool event_log_missing_{false};
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE

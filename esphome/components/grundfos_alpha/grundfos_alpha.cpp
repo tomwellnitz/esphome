@@ -71,7 +71,7 @@ static constexpr SettingLayouts ALPHA3_SETTINGS = {{
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
 // Add a model only after it was tested on a real pump
 static constexpr Model MODELS[] = {
-    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS},
+    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS, true},
 };
 
 // missing_ and warned_ keep a bit per object index
@@ -158,6 +158,23 @@ PROGMEM_STRING_TABLE(ControlSourceNames, "Undefined", "Panel", "Bus", "Link", "E
 static constexpr uint8_t TEXT_IDS[] = {1, 8, 50, 58};
 static_assert(std::size(TEXT_IDS) == TEXT_COUNT);
 
+// A class 7 reply carries no ID, so a reply to an earlier text that comes late would pass for the text asked for. A
+// real ALPHA3 sent "ALPHA3 25-60 180", "99371929", "99365052V01.00.06.00429" and "99365068V03.00.06.00001": the name
+// starts with a letter, the product number has only digits and a version has digits before a V. The two versions
+// cannot be told apart.
+static bool is_plausible_text(InfoStep step, std::span<const uint8_t> text) {
+  const auto is_digit = [](uint8_t c) { return c >= '0' && c <= '9'; };
+  const auto digits = std::find_if_not(text.begin(), text.end(), is_digit);
+  switch (step) {
+    case InfoStep::INFO_STEP_PRODUCT_NAME:
+      return !text.empty() && ((text[0] >= 'A' && text[0] <= 'Z') || (text[0] >= 'a' && text[0] <= 'z'));
+    case InfoStep::INFO_STEP_PRODUCT_NUMBER:
+      return !text.empty() && digits == text.end();
+    default:
+      return digits != text.begin() && digits != text.end() && *digits == 'V';
+  }
+}
+
 static constexpr uint8_t DIAGNOSTICS_OBJECT = 88;
 // 88/10199 EventLogInfo, type 0x00F3 v1: u16 latest_event_id, u16 current_entries, u16 log_size, bool extended_info
 static constexpr uint16_t EVENT_LOG_SUB_ID = 10199;
@@ -170,7 +187,9 @@ static constexpr uint16_t FIRST_EVENT_SUB_ID = 10200;
 static constexpr uint16_t EVENT_TYPE = 0x00F4;
 static constexpr size_t EVENT_SIZE = 11;
 static constexpr uint8_t OFFSET_EVENT_TYPE = 6;
-// EventType of profile 52_1_0 at its index; the first name is the fallback, the last is an empty log
+// Enum EventType of the Grundfos GO app profile 52_1_0 at its index (1 AlarmAppeared, 2 AlarmDisappered,
+// 3 WarningAppeared, 4 WarningDisappered), not confirmed on a pump beyond a real ALPHA3 logging dry running (code 57)
+// with type 1, then 2. The first name is the fallback, the last is an empty log.
 PROGMEM_STRING_TABLE(EventNames, "Event", "Alarm appeared", "Alarm cleared", "Warning appeared", "Warning cleared",
                      "No events");
 #endif
@@ -290,6 +309,7 @@ void GrundfosAlpha::on_connected() {
   this->missing_ = 0;
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   this->texts_read_ = 0;
+  this->texts_retried_ = 0;
   this->event_wanted_ = 0;
   this->event_log_missing_ = false;
 #endif
@@ -589,7 +609,7 @@ text_sensor::TextSensor *GrundfosAlpha::text_sensor_(InfoStep step) const {
 }
 
 bool GrundfosAlpha::wants_info_(InfoStep step) const {
-  if (this->text_sensor_(step) == nullptr)
+  if (!this->model_->info || this->text_sensor_(step) == nullptr)
     return false;
   const size_t i = static_cast<size_t>(step);
   if (i < TEXT_COUNT)
@@ -620,18 +640,32 @@ void GrundfosAlpha::decode_info_(InfoStep step, const genibus::GenibusResponse &
   // The bus has logged a timeout or a broken frame; read again at the next update
   if (response.error != GenibusError::GENIBUS_ERROR_NONE)
     return;
-  const size_t i = static_cast<size_t>(step);
+  const uint8_t bit = 1u << static_cast<size_t>(step);
   genibus::ApduReader reader(response.apdus);
   genibus::Apdu apdu{};
   std::span<const uint8_t> text;
-  if (reader.next(apdu) && genibus::parse_text(apdu, text)) {
+  const bool replied = reader.next(apdu);
+  if (replied && genibus::parse_text(apdu, text) && is_plausible_text(step, text)) {
     PUBLISH_STATE(this->text_sensor_(step), reinterpret_cast<const char *>(text.data()), text.size());
-  } else if (this->first_warning_(WARNED_INFO)) {
-    ESP_LOGW(TAG, "Unexpected reply to text %u: class %u, ACK %u, %u bytes", TEXT_IDS[i], apdu.data_class, apdu.ack,
-             static_cast<unsigned>(apdu.data.size()));
+    this->texts_read_ |= bit;
+    return;
   }
-  // A text the pump does not have is not asked for again until the next connection
-  this->texts_read_ |= 1u << i;
+  if (this->first_warning_(WARNED_INFO)) {
+    ESP_LOGW(TAG, "Unexpected reply to text %u: class %u, ACK %u, %u bytes", TEXT_IDS[static_cast<size_t>(step)],
+             apdu.data_class, apdu.ack, static_cast<unsigned>(apdu.data.size()));
+  }
+  // A text the pump refuses (an ACK) or sends in another form is not asked for again until the next connection. A
+  // reply of another class or an implausible text may be a late reply to an earlier request: asked for once more.
+  const bool late = !replied || apdu.data_class != genibus::CLASS_ASCII || (apdu.ack == 0 && !text.empty());
+  if (!late || (this->texts_retried_ & bit) != 0)
+    this->texts_read_ |= bit;
+  this->texts_retried_ |= bit;
+}
+
+void GrundfosAlpha::clear_last_event_() {
+  auto *sensor = this->last_event_text_sensor_;
+  if (sensor->has_state() && !sensor->state.empty())
+    sensor->publish_state("");
 }
 
 bool GrundfosAlpha::parse_event_object_(const genibus::GenibusResponse &response, uint16_t sub_id, uint16_t type,
@@ -671,14 +705,16 @@ void GrundfosAlpha::decode_event_log_(const genibus::GenibusResponse &response) 
     }
     return;
   }
-  if (latest == this->event_shown_)
-    return;
   if (log_size == 0 || log_size > UINT16_MAX - FIRST_EVENT_SUB_ID) {
     if (this->first_warning_(WARNED_INFO)) {
       ESP_LOGW(TAG, "Event log of %u entries not read", log_size);
     }
+    this->clear_last_event_();
+    this->event_shown_ = NO_EVENT_SHOWN;
     return;
   }
+  if (latest == this->event_shown_)
+    return;
   this->event_wanted_ = latest;
   this->event_sub_id_ = FIRST_EVENT_SUB_ID + (latest - 1) % log_size;
 }
@@ -698,6 +734,7 @@ void GrundfosAlpha::decode_event_(const genibus::GenibusResponse &response) {
     if (this->first_warning_(WARNED_INFO)) {
       ESP_LOGW(TAG, "Object 88/%u holds event %u, not the latest event %u", this->event_sub_id_, id, wanted);
     }
+    this->clear_last_event_();
     return;
   }
   const uint8_t type = body[OFFSET_EVENT_TYPE];

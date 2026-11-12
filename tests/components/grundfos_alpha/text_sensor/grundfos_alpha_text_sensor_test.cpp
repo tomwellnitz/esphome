@@ -150,22 +150,64 @@ TEST_F(ProductTextTest, TextWithoutAnswerIsAskedAgain) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
-TEST_F(ProductTextTest, BadTextIsNotShownNorAskedAgain) {
+TEST_F(ProductTextTest, RefusedTextIsNotAskedAgain) {
   this->identify_();
   ASSERT_EQ(this->next_request_(), FRAME_TEXT_1);
   this->reply_(REPLY_TEXT_ID_UNKNOWN);
   ASSERT_EQ(this->next_request_(), FRAME_TEXT_8);
   this->reply_(REPLY_TEXT_NO_ZERO);
   ASSERT_EQ(this->next_request_(), FRAME_TEXT_50);
-  // A reply of another class
-  this->reply_(REPLY_EVENT_LOG_6);
+  this->reply_(REPLY_SOFTWARE_VERSION);
   ASSERT_EQ(this->next_request_(), FRAME_TEXT_58);
   this->reply_(REPLY_BLUETOOTH_SOFTWARE_VERSION);
   EXPECT_FALSE(this->product_name_.has_state());
   EXPECT_FALSE(this->product_number_.has_state());
+  EXPECT_EQ(this->software_version_.state, "99365052V01.00.06.00429");
+  this->pump_.update();
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
+// Replies that look like late replies to an earlier request: another text, or a reply of another class
+TEST_F(ProductTextTest, LateReplyIsNotShownAndAskedOnceMore) {
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_TEXT_1);
+  this->reply_(REPLY_PRODUCT_NUMBER);
+  ASSERT_EQ(this->next_request_(), FRAME_TEXT_8);
+  this->reply_(REPLY_SOFTWARE_VERSION);
+  ASSERT_EQ(this->next_request_(), FRAME_TEXT_50);
+  this->reply_(REPLY_EVENT_LOG_6);
+  ASSERT_EQ(this->next_request_(), FRAME_TEXT_58);
+  this->reply_(REPLY_PRODUCT_NAME);
+  EXPECT_FALSE(this->product_name_.has_state());
+  EXPECT_FALSE(this->product_number_.has_state());
   EXPECT_FALSE(this->software_version_.has_state());
+  EXPECT_FALSE(this->bluetooth_software_version_.has_state());
+  this->pump_.update();
+  this->read_texts_();
+  EXPECT_EQ(this->product_name_.state, "ALPHA3 25-60 180");
+  EXPECT_EQ(this->product_number_.state, "99371929");
+  EXPECT_EQ(this->software_version_.state, "99365052V01.00.06.00429");
   EXPECT_EQ(this->bluetooth_software_version_.state, "99365068V03.00.06.00001");
   this->pump_.update();
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
+TEST_F(ProductTextTest, TextThatDoesNotFitTwiceIsNotAskedAgain) {
+  this->identify_();
+  for (int round = 0; round < 2; round++) {
+    if (round == 0) {
+      ASSERT_EQ(this->next_request_(), FRAME_TEXT_1);
+      this->reply_(REPLY_PRODUCT_NAME);
+      ASSERT_EQ(this->next_request_(), FRAME_TEXT_8);
+      this->reply_(REPLY_PRODUCT_NUMBER);
+      ASSERT_EQ(this->next_request_(), FRAME_TEXT_50);
+      this->reply_(REPLY_SOFTWARE_VERSION);
+    }
+    ASSERT_EQ(this->next_request_(), FRAME_TEXT_58);
+    this->reply_(REPLY_PRODUCT_NUMBER);  // digits without a V
+    this->pump_.update();
+  }
+  EXPECT_FALSE(this->bluetooth_software_version_.has_state());
   EXPECT_TRUE(this->next_request_().empty());
 }
 
@@ -235,6 +277,21 @@ TEST_F(LastEventTest, EntryOfAnotherEventIsNotShownNorReadAgain) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
+TEST_F(LastEventTest, EntryOfAnotherEventEmptiesTheShownEvent) {
+  this->identify_();
+  this->read_event_6_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_88_10199);
+  this->reply_(REPLY_EVENT_LOG_7);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_88_10206);
+  this->reply_(REPLY_EVENT_6);
+  EXPECT_EQ(this->last_event_.state, "");
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_88_10199);
+  this->reply_(REPLY_EVENT_LOG_7);
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
 TEST_F(LastEventTest, EntryWithoutAnswerIsReadAgain) {
   this->identify_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_88_10199);
@@ -258,6 +315,20 @@ TEST_F(LastEventTest, BadLogIsNotUsed) {
   this->reply_(REPLY_EVENT_6);  // an entry instead of the log
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->last_event_.has_state());
+}
+
+TEST_F(LastEventTest, BadLogEmptiesTheShownEvent) {
+  this->identify_();
+  this->read_event_6_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_88_10199);
+  this->reply_(REPLY_EVENT_LOG_SIZE_0);
+  EXPECT_EQ(this->last_event_.state, "");
+  EXPECT_TRUE(this->next_request_().empty());
+  // A good log again: the entry is read again
+  this->pump_.update();
+  this->read_event_6_();
+  EXPECT_EQ(this->last_event_.state, "Alarm cleared (code 57)");
 }
 
 TEST_F(LastEventTest, MissingLogIsNotAskedForUntilReconnect) {
