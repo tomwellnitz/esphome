@@ -84,7 +84,6 @@ class TestDevice : public GenibusDevice {
   bool request_flow_head() { return this->request_object_(93, 289); }
   bool set(std::span<const uint8_t> body) { return this->set_object_(86, 100, 0x0154, 1, body); }
   bool command(uint8_t id) { return this->send_command_(id); }
-  bool reference(uint8_t id, uint8_t value) { return this->set_reference_(id, value); }
 
   std::vector<Received> responses;
   int connects{0};
@@ -478,11 +477,6 @@ TEST_F(GenibusBusTest, DeviceSendsSetAndCommand) {
   this->run_();
   ASSERT_EQ(this->bus_.written.size(), 2u);
   EXPECT_EQ(this->bus_.written[1], (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x03, 0x81, 0x06, 0xE5, 0x87}));
-  this->receive_(REPLY_ACK);
-  EXPECT_TRUE(this->pump_.reference(75, 0));
-  this->run_();
-  ASSERT_EQ(this->bus_.written.size(), 3u);
-  EXPECT_EQ(this->bus_.written[2], (Bytes{0x27, 0x06, 0xE7, 0xF8, 0x05, 0x82, 0x4B, 0x00, 0xE9, 0x5F}));
 }
 
 TEST_F(GenibusBusTest, SetBodyMustFitOneRequest) {

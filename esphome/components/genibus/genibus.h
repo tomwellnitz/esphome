@@ -128,8 +128,6 @@ class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
   bool set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version, std::span<const uint8_t> body);
   /// Send one class 3 command.
   bool send_command_(uint8_t command);
-  /// Send a class 5 SET of one reference value.
-  bool set_reference_(uint8_t id, uint8_t value);
 
   uint8_t address_{0};
 };

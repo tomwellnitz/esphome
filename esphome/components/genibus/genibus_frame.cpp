@@ -53,14 +53,6 @@ uint8_t *put_command(uint8_t *dst, uint8_t command) {
   return dst;
 }
 
-uint8_t *put_set_reference(uint8_t *dst, uint8_t id, uint8_t value) {
-  *dst++ = CLASS_REFERENCE;
-  *dst++ = OPERATION_SET | 2;
-  *dst++ = id;
-  *dst++ = value;
-  return dst;
-}
-
 bool ApduReader::next(Apdu &apdu) {
   if (this->rest_.size() < 2)
     return false;
