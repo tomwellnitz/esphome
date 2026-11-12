@@ -118,14 +118,13 @@ bool GrundfosAlpha::identify_(const genibus::GenibusResponse &response) {
     if (model.family == family && model.type == type && model.version == version) {
       this->model_ = &model;
       this->status_clear_warning();
-      ESP_LOGI(TAG, "Found %s (unit %u/%u/%u)", LOG_STR_ARG(ModelNames::get_log_str(model.name, 0)), family, type,
-               version);
+      ESP_LOGI(TAG, "Found %s", LOG_STR_ARG(ModelNames::get_log_str(model.name, 0)));
       return true;
     }
   }
   this->unsupported_ = true;
   this->status_set_warning(LOG_STR("Model not supported"));
-  ESP_LOGW(TAG, "Model not supported yet (unit family/type/version %u/%u/%u), please report it", family, type, version);
+  ESP_LOGW(TAG, "Model %u/%u/%u not supported", family, type, version);
   return false;
 }
 
