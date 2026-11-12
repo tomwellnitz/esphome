@@ -3,20 +3,28 @@ from esphome.components import sensor
 import esphome.config_validation as cv
 from esphome.const import (
     CONF_CURRENT,
+    CONF_ENERGY,
     CONF_FLOW,
     CONF_HEAD,
     CONF_POWER,
     CONF_SPEED,
     CONF_VOLTAGE,
     DEVICE_CLASS_CURRENT,
+    DEVICE_CLASS_DURATION,
+    DEVICE_CLASS_ENERGY,
     DEVICE_CLASS_POWER,
     DEVICE_CLASS_TEMPERATURE,
     DEVICE_CLASS_VOLTAGE,
     DEVICE_CLASS_VOLUME_FLOW_RATE,
+    ENTITY_CATEGORY_DIAGNOSTIC,
+    ICON_COUNTER,
     STATE_CLASS_MEASUREMENT,
+    STATE_CLASS_TOTAL_INCREASING,
     UNIT_AMPERE,
     UNIT_CELSIUS,
     UNIT_CUBIC_METER_PER_HOUR,
+    UNIT_HOUR,
+    UNIT_KILOWATT_HOURS,
     UNIT_METER,
     UNIT_REVOLUTIONS_PER_MINUTE,
     UNIT_VOLT,
@@ -28,7 +36,11 @@ from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
 
 DEPENDENCIES = ["grundfos_alpha"]
 
+CONF_ALARM_CODE = "alarm_code"
 CONF_MEDIUM_TEMPERATURE = "medium_temperature"
+CONF_OPERATING_HOURS = "operating_hours"
+CONF_STARTS = "starts"
+CONF_WARNING_CODE = "warning_code"
 
 
 def _schema(unit: str, decimals: int, device_class: str | None = None) -> cv.Schema:
@@ -54,6 +66,33 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_CURRENT): _schema(UNIT_AMPERE, 3, DEVICE_CLASS_CURRENT),
         cv.Optional(CONF_POWER): _schema(UNIT_WATT, 1, DEVICE_CLASS_POWER),
         cv.Optional(CONF_SPEED): _schema(UNIT_REVOLUTIONS_PER_MINUTE, 0),
+        cv.Optional(CONF_ENERGY): sensor.sensor_schema(
+            unit_of_measurement=UNIT_KILOWATT_HOURS,
+            accuracy_decimals=3,
+            device_class=DEVICE_CLASS_ENERGY,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+        ),
+        cv.Optional(CONF_OPERATING_HOURS): sensor.sensor_schema(
+            unit_of_measurement=UNIT_HOUR,
+            accuracy_decimals=1,
+            device_class=DEVICE_CLASS_DURATION,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_STARTS): sensor.sensor_schema(
+            icon=ICON_COUNTER,
+            accuracy_decimals=0,
+            state_class=STATE_CLASS_TOTAL_INCREASING,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_WARNING_CODE): sensor.sensor_schema(
+            accuracy_decimals=0,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
+        cv.Optional(CONF_ALARM_CODE): sensor.sensor_schema(
+            accuracy_decimals=0,
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
     }
 )
 
@@ -68,3 +107,8 @@ async def to_code(config: ConfigType) -> None:
     await sensors(CONF_CURRENT, hub.set_current_sensor)
     await sensors(CONF_POWER, hub.set_power_sensor)
     await sensors(CONF_SPEED, hub.set_speed_sensor)
+    await sensors(CONF_ENERGY, hub.set_energy_sensor)
+    await sensors(CONF_OPERATING_HOURS, hub.set_operating_hours_sensor)
+    await sensors(CONF_STARTS, hub.set_starts_sensor)
+    await sensors(CONF_WARNING_CODE, hub.set_warning_code_sensor)
+    await sensors(CONF_ALARM_CODE, hub.set_alarm_code_sensor)
