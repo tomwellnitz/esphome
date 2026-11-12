@@ -23,6 +23,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
 #include "esphome/components/button/button.h"
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+#include "esphome/components/switch/switch.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -53,7 +56,7 @@ struct ObjectLayout {
   std::span<const Field> fields;
 };
 
-/// The settings objects of group 86 the entities show, in the order they are polled after the measurements.
+/// The settings objects the entities show, in the order they are polled after the measurements.
 enum class Setting : uint8_t {
   SETTING_REALIZED,  // 86/8: the operating mode and control source in effect
   SETTING_CONTROL_MODE,
@@ -64,11 +67,13 @@ enum class Setting : uint8_t {
   SETTING_PROPORTIONAL_PRESSURE,
   SETTING_CONSTANT_SPEED_LIMITS,
   SETTING_CONSTANT_SPEED,
+  SETTING_AUTOMATIC_NIGHT_SETBACK,
   SETTING_COUNT,
 };
 
-/// A settings object (object 86) as one model sends it.
+/// A settings object as one model sends it.
 struct SettingLayout {
+  uint8_t object;
   uint16_t sub_id;
   uint16_t type;
   uint8_t version;
@@ -89,7 +94,7 @@ enum class JobPhase : uint8_t {
   JOB_PHASE_READ,     // the object is read before it is changed
   JOB_PHASE_WRITE,    // the changed object is written
   JOB_PHASE_VERIFY,   // the object is read back
-  JOB_PHASE_COMMAND,  // a class 3 command is on the wire
+  JOB_PHASE_COMMAND,  // a class 3 command or class 5 write is on the wire
 };
 
 /// Class 3 commands the Grundfos GO app sends to an ALPHA3; the value is the command ID. A stop lasts through a loss
@@ -99,6 +104,7 @@ enum class Command : uint8_t {
   COMMAND_RESET_ALARM = 2,
   COMMAND_STOP = 5,
   COMMAND_START = 6,  // AUTO in the profile
+  COMMAND_RESET_ALARM_LOG = 51,
 };
 
 // The largest settings object that is written (type 0x012E, 18 bytes)
@@ -109,7 +115,7 @@ static constexpr size_t WRITE_QUEUE_SIZE = 4;
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
 /// One write: change one byte or one big-endian float of a settings object, or send a command (setting is then
-/// SETTING_COUNT).
+/// SETTING_COUNT). With SETTING_COUNT and COMMAND_NONE, byte_value goes to the air venting reference value.
 struct WriteRequest {
   Setting setting;
   uint8_t offset;  // of the value in the body
@@ -155,6 +161,12 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   SUB_BUTTON(start)
   SUB_BUTTON(stop)
   SUB_BUTTON(reset_alarm)
+  SUB_BUTTON(start_air_venting)
+  SUB_BUTTON(stop_air_venting)
+  SUB_BUTTON(clear_alarm_log)
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  SUB_SWITCH(automatic_night_setback)
 #endif
 
  public:
@@ -178,8 +190,13 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   }
   void write_number(NumberSetting setting, float value);
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  void write_automatic_night_setback(bool state);
+#endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   void send_command(Command command);
+  /// Start or stop air venting; it runs the pump at high speed until it times out or is stopped.
+  void write_air_venting(bool on);
 #endif
 
  protected:
@@ -214,7 +231,7 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool same_outside_value_(std::span<const uint8_t> body) const;
   /// Whether a read-back confirms the write in job_body_.
   bool confirms_job_(std::span<const uint8_t> body) const;
-  uint16_t job_sub_id_() const;
+  const SettingLayout &job_layout_() const;
   /// Why the job must not start now, or nullptr when it may.
   const LogString *job_refusal_() const;
 #endif

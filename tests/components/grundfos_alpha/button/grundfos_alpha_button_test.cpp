@@ -4,13 +4,14 @@ namespace esphome::grundfos_alpha::testing {
 
 using CommandTest = SelectTest;
 
-TEST_F(CommandTest, SendsTheThreeCommands) {
+TEST_F(CommandTest, SendsTheCommands) {
   this->identify_();
   EXPECT_TRUE(this->next_request_().empty());
   const std::pair<Command, Bytes> commands[] = {
       {Command::COMMAND_START, FRAME_COMMAND_6},
       {Command::COMMAND_STOP, FRAME_COMMAND_5},
       {Command::COMMAND_RESET_ALARM, FRAME_COMMAND_2},
+      {Command::COMMAND_RESET_ALARM_LOG, FRAME_COMMAND_51},
   };
   for (const auto &[command, frame] : commands) {
     this->pump_.send_command(command);
@@ -22,8 +23,62 @@ TEST_F(CommandTest, SendsTheThreeCommands) {
 
 TEST_F(CommandTest, OnlyTheAppsCommandsAreSent) {
   this->identify_();
-  this->pump_.send_command(static_cast<Command>(1));
+  // 1 is not one of them; 7 is REMOTE, which leaves an ALPHA deaf to Bluetooth for a while
+  for (uint8_t id : {1, 4, 7, 8, 22, 52}) {
+    this->pump_.send_command(static_cast<Command>(id));
+    EXPECT_TRUE(this->next_request_().empty());
+  }
+}
+
+TEST_F(CommandTest, StartsAndStopsAirVenting) {
+  this->identify_();
+  this->pump_.write_air_venting(true);
+  ASSERT_EQ(this->next_request_(), FRAME_AIR_VENTING_ON);
+  this->reply_(REPLY_REFERENCE_ACK);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  this->pump_.write_air_venting(false);
+  ASSERT_EQ(this->next_request_(), FRAME_AIR_VENTING_OFF);
+  this->reply_(REPLY_REFERENCE_ACK);
+  EXPECT_FALSE(this->pump_.status_has_warning());
   EXPECT_TRUE(this->next_request_().empty());
+}
+
+TEST_F(CommandTest, BadAirVentingRepliesAreWarned) {
+  // ACK 3, a reply with data, a class 3 reply, and none at all
+  this->identify_();
+  for (const Bytes &reply : {REPLY_REFERENCE_ACK_ILLEGAL, REPLY_REFERENCE_WITH_DATA, REPLY_COMMAND_ACK, Bytes{}}) {
+    this->pump_.write_air_venting(true);
+    ASSERT_EQ(this->next_request_(), FRAME_AIR_VENTING_ON);
+    if (reply.empty()) {
+      this->run_(TIMEOUT_MS);
+    } else {
+      this->reply_(reply);
+    }
+    EXPECT_TRUE(this->pump_.status_has_warning());
+    this->pump_.update();
+    EXPECT_FALSE(this->pump_.status_has_warning());
+  }
+}
+
+// A stop that comes while the start still waits replaces it
+TEST_F(CommandTest, WaitingAirVentingIsReplaced) {
+  this->read_selects_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->pump_.write_air_venting(true);
+  this->pump_.write_air_venting(false);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  EXPECT_EQ(this->next_request_(), FRAME_AIR_VENTING_OFF);
+  EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
+}
+
+TEST_F(CommandTest, AirVentingIsRefusedWithoutConnection) {
+  this->identify_();
+  this->bus_.lose_connection();
+  this->pump_.write_air_venting(true);
+  this->bus_.establish_connection();
+  this->run_();
+  EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
 }
 
 TEST_F(CommandTest, RefusedCommandIsWarned) {
