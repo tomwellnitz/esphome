@@ -55,3 +55,13 @@ number:
       name: Pump proportional pressure set point
     constant_speed_setpoint:
       name: Pump constant speed set point
+
+button:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    start:
+      name: Pump start
+    stop:
+      name: Pump stop
+    reset_alarm:
+      name: Pump reset alarm

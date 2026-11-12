@@ -20,6 +20,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
 #include "esphome/components/number/number.h"
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
+#include "esphome/components/button/button.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -83,9 +86,19 @@ enum class NumberSetting : uint8_t {
 
 enum class JobPhase : uint8_t {
   JOB_PHASE_NONE,
-  JOB_PHASE_READ,    // the object is read before it is changed
-  JOB_PHASE_WRITE,   // the changed object is written
-  JOB_PHASE_VERIFY,  // the object is read back
+  JOB_PHASE_READ,     // the object is read before it is changed
+  JOB_PHASE_WRITE,    // the changed object is written
+  JOB_PHASE_VERIFY,   // the object is read back
+  JOB_PHASE_COMMAND,  // a class 3 command is on the wire
+};
+
+/// Class 3 commands the Grundfos GO app sends to an ALPHA3; the value is the command ID. A stop lasts through a loss
+/// of power until a start.
+enum class Command : uint8_t {
+  COMMAND_NONE = 0,
+  COMMAND_RESET_ALARM = 2,
+  COMMAND_STOP = 5,
+  COMMAND_START = 6,  // AUTO in the profile
 };
 
 // The largest settings object that is written (type 0x012E, 18 bytes)
@@ -95,13 +108,15 @@ static constexpr size_t WRITE_QUEUE_SIZE = 4;
 
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
-/// One write: change one byte or one big-endian float of a settings object.
+/// One write: change one byte or one big-endian float of a settings object, or send a command (setting is then
+/// SETTING_COUNT).
 struct WriteRequest {
   Setting setting;
   uint8_t offset;  // of the value in the body
   uint8_t byte_value;
   bool is_float;
   float float_value;
+  Command command;
 };
 
 /// The objects read from a pump of one unit family, type and version; settings is null for a model without them.
@@ -136,6 +151,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   SUB_TEXT_SENSOR(operating_mode)
   SUB_TEXT_SENSOR(control_source)
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
+  SUB_BUTTON(start)
+  SUB_BUTTON(stop)
+  SUB_BUTTON(reset_alarm)
+#endif
 
  public:
   void update() override;
@@ -158,6 +178,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   }
   void write_number(NumberSetting setting, float value);
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  void send_command(Command command);
+#endif
 
  protected:
   bool identify_(const genibus::GenibusResponse &response);
@@ -178,7 +201,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool enqueue_(const WriteRequest &request, const LogString *what);
   /// Start the next waiting write; false when none was started.
   bool start_job_();
-  /// Whether the objects a write depends on were polled since the connection came up and since the last write.
+  /// Whether the objects a write depends on were polled since the connection came up and since the last write or
+  /// command.
   bool job_ready_(const WriteRequest &request) const;
   /// Whether any settings object is polled.
   bool polls_settings_() const;
