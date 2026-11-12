@@ -483,7 +483,7 @@ void GrundfosAlpha::write_number(NumberSetting setting, float value) {
              this->max_[i] / NUMBERS[i].raw_per_unit);
     return;
   }
-  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 0, true, raw}, LOG_STR("Set point"));
+  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 0, true, raw, Command::COMMAND_NONE}, LOG_STR("Set point"));
 }
 #endif
 
@@ -493,9 +493,10 @@ void GrundfosAlpha::write_select(SelectSetting setting, size_t index) {
   const std::span<const uint8_t> values = control ? std::span<const uint8_t>(CONTROL_MODES) : OPERATING_MODES;
   if (index >= values.size())
     return;
-  this->enqueue_({control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
-                  control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index], false, 0.0f},
-                 control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
+  this->enqueue_(
+      {control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
+       control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index], false, 0.0f, Command::COMMAND_NONE},
+      control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
 }
 #endif
 
@@ -505,7 +506,8 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
     return false;
   }
   size_t slot = 0;
-  while (slot < this->queued_ && this->queue_[slot].setting != request.setting)
+  while (slot < this->queued_ &&
+         (this->queue_[slot].setting != request.setting || this->queue_[slot].command != request.command))
     slot++;
   if (slot < this->queued_) {
     ESP_LOGV(TAG, "Replacing a waiting write");
@@ -522,6 +524,19 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
   return true;
 }
 
+void GrundfosAlpha::send_command(Command command) {
+  // Only the commands the app sends; the bus would send any ID
+  switch (command) {
+    case Command::COMMAND_RESET_ALARM:
+    case Command::COMMAND_STOP:
+    case Command::COMMAND_START:
+      this->enqueue_({Setting::SETTING_COUNT, 0, 0, false, 0.0f, command}, LOG_STR("Command"));
+      break;
+    default:
+      break;
+  }
+}
+
 bool GrundfosAlpha::start_job_() {
   if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->model_ == nullptr || this->model_->settings == nullptr)
     return false;
@@ -529,6 +544,15 @@ bool GrundfosAlpha::start_job_() {
     this->job_ = this->queue_[0];
     std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
     this->queued_--;
+    if (this->job_.setting == Setting::SETTING_COUNT) {
+      this->phase_ = JobPhase::JOB_PHASE_COMMAND;
+      if (!this->send_command_(static_cast<uint8_t>(this->job_.command))) {
+        this->end_job_(LOG_STR("not sent"));
+        return false;
+      }
+      this->current_ = REQUEST_WRITE;
+      return true;
+    }
     this->phase_ = JobPhase::JOB_PHASE_READ;
     // Checked now, not when queued: a control mode written just before counts
     if (!this->job_allowed_()) {
@@ -661,6 +685,22 @@ void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
       this->end_job_(same ? nullptr : LOG_STR("the pump kept another value"));
       break;
     }
+    case JobPhase::JOB_PHASE_COMMAND: {
+      // A command reply has no data
+      genibus::ApduReader reader(response.apdus);
+      genibus::Apdu apdu{};
+      if (response.error != GenibusError::GENIBUS_ERROR_NONE) {
+        this->end_job_(LOG_STR("no reply"));
+      } else if (!reader.next(apdu) || apdu.data_class != genibus::CLASS_COMMAND || apdu.ack != 0 ||
+                 !apdu.data.empty()) {
+        ESP_LOGV(TAG, "Command reply: class %u, ACK %u, %u bytes", apdu.data_class, apdu.ack,
+                 static_cast<unsigned>(apdu.data.size()));
+        this->end_job_(LOG_STR("refused"));
+      } else {
+        this->end_job_(nullptr);
+      }
+      break;
+    }
     default:
       return;
   }
@@ -682,7 +722,11 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
     }
     return;
   }
-  ESP_LOGW(TAG, "Write to 86/%u failed: %s", this->job_sub_id_(), LOG_STR_ARG(failure));
+  if (this->job_.setting == Setting::SETTING_COUNT) {
+    ESP_LOGW(TAG, "Command %u failed: %s", static_cast<uint8_t>(this->job_.command), LOG_STR_ARG(failure));
+  } else {
+    ESP_LOGW(TAG, "Write to 86/%u failed: %s", this->job_sub_id_(), LOG_STR_ARG(failure));
+  }
   this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
   this->status_set_warning(LOG_STR("Write failed"));
 }
