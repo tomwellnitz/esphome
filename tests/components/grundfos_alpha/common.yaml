@@ -29,3 +29,11 @@ sensor:
       name: Pump power
     speed:
       name: Pump speed
+
+text_sensor:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    operating_mode:
+      name: Pump operating mode in effect
+    control_source:
+      name: Pump control source
