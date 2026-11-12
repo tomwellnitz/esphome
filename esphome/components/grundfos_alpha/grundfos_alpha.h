@@ -76,6 +76,19 @@ struct SettingLayout {
 };
 using SettingLayouts = std::array<SettingLayout, static_cast<size_t>(Setting::SETTING_COUNT)>;
 
+/// The reads of the text sensors, polled after the settings: the texts once per connection, the event log at every
+/// update and the entry of its latest event when that changed.
+enum class InfoStep : uint8_t {
+  INFO_STEP_PRODUCT_NAME,
+  INFO_STEP_PRODUCT_NUMBER,
+  INFO_STEP_SOFTWARE_VERSION,
+  INFO_STEP_BLUETOOTH_SOFTWARE_VERSION,
+  INFO_STEP_EVENT_LOG,
+  INFO_STEP_EVENT,
+  INFO_STEP_COUNT,
+};
+static constexpr size_t TEXT_COUNT = static_cast<size_t>(InfoStep::INFO_STEP_EVENT_LOG);
+
 enum class SelectSetting : uint8_t { SELECT_SETTING_CONTROL_MODE, SELECT_SETTING_OPERATING_MODE, SELECT_SETTING_COUNT };
 enum class NumberSetting : uint8_t {
   NUMBER_SETTING_CONSTANT_PRESSURE,
@@ -133,6 +146,7 @@ struct Model {
 static constexpr uint8_t REQUEST_WRITE = 0xFD;
 static constexpr uint8_t REQUEST_IDENTITY = 0xFE;
 static constexpr uint8_t REQUEST_NONE = 0xFF;
+static constexpr uint32_t NO_EVENT_SHOWN = 0x10000;
 
 /// A Grundfos ALPHA circulator pump. It reads the pump's unit family, type and version once, then polls the
 /// objects of that model: the measurements first, then the settings its entities show. A write reads the settings
@@ -150,6 +164,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   SUB_TEXT_SENSOR(operating_mode)
   SUB_TEXT_SENSOR(control_source)
+  SUB_TEXT_SENSOR(product_name)
+  SUB_TEXT_SENSOR(product_number)
+  SUB_TEXT_SENSOR(software_version)
+  SUB_TEXT_SENSOR(bluetooth_software_version)
+  SUB_TEXT_SENSOR(last_event)
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
   SUB_BUTTON(start)
@@ -161,10 +180,7 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   void update() override;
   void dump_config() override;
   void on_response(const genibus::GenibusResponse &response) override;
-  void on_connected() override {
-    this->missing_ = 0;
-    this->update();
-  }
+  void on_connected() override;
   void on_disconnected() override;
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
   void set_select(SelectSetting setting, select::Select *entity) {
@@ -195,6 +211,17 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   /// Returns whether the reply held a valid object.
   bool decode_setting_(Setting setting, const genibus::GenibusResponse &response);
   void publish_setting_(Setting setting, std::span<const uint8_t> body);
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  bool wants_info_(InfoStep step) const;
+  bool request_info_(InfoStep step);
+  void decode_info_(InfoStep step, const genibus::GenibusResponse &response);
+  /// The class 10 object in a reply with status 0, checked against type, version and size.
+  bool parse_event_object_(const genibus::GenibusResponse &response, uint16_t sub_id, uint16_t type, size_t size,
+                           genibus::DataObject &object);
+  void decode_event_log_(const genibus::GenibusResponse &response);
+  void decode_event_(const genibus::GenibusResponse &response);
+  text_sensor::TextSensor *text_sensor_(InfoStep step) const;
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   /// Queue a write; a waiting write of the same setting is replaced. Returns false when it is refused.
@@ -231,6 +258,14 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   uint8_t missing_{0};  // a bit per object index the pump does not have
   bool unsupported_{false};
   bool has_values_{false};
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  // The event the last event sensor shows; NO_EVENT_SHOWN before it shows one
+  uint32_t event_shown_{NO_EVENT_SHOWN};
+  uint16_t event_wanted_{0};  // the latest event of the log, whose entry is read next; 0 for none
+  uint16_t event_sub_id_{0};  // the object 88 entry that holds it
+  uint8_t texts_read_{0};     // a bit per text read since the connection came up
+  bool event_log_missing_{false};
+#endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
 #ifdef USE_SELECT
   std::array<select::Select *, static_cast<size_t>(SelectSetting::SELECT_SETTING_COUNT)> selects_{};
