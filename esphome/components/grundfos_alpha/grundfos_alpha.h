@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -34,6 +35,7 @@ enum class Reading : uint8_t {
   READING_CURRENT,
   READING_POWER,
   READING_SPEED,
+  // Counters that only grow; keep them together and READING_ENERGY first (see totals_)
   READING_ENERGY,
   READING_OPERATING_HOURS,
   READING_STARTS,
@@ -53,8 +55,8 @@ enum class FieldFormat : uint8_t {
 struct Field {
   Reading reading;
   uint8_t offset;
+  FieldFormat format;
   float factor;
-  FieldFormat format{FieldFormat::FIELD_FORMAT_FLOAT};
 };
 
 /// A class 10 object as one model sends it. A reply of another type, version or size is not decoded.
@@ -250,6 +252,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   uint8_t missing_{0};  // a bit per object index the pump does not have
   bool unsupported_{false};
   bool has_values_{false};
+#ifdef USE_SENSOR
+  // The highest value published per counter, from READING_ENERGY to READING_STARTS
+  std::array<float, static_cast<size_t>(Reading::READING_STARTS) - static_cast<size_t>(Reading::READING_ENERGY) + 1>
+      totals_{NAN, NAN, NAN};
+#endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
 #ifdef USE_SELECT
   std::array<select::Select *, static_cast<size_t>(SelectSetting::SELECT_SETTING_COUNT)> selects_{};

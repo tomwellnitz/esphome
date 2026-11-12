@@ -24,6 +24,25 @@ inline const Bytes REPLY_HISTORY_V1 = {0x24, 0x27, 0xF8, 0xE7, 0x0A, 0x23, 0x00,
                                        0x00, 0x1C, 0x00, 0x00, 0x07, 0x39, 0x00, 0x01, 0x00, 0x01, 0x02,
                                        0x01, 0x61, 0xCA, 0x00, 0x00, 0x0B, 0xF3, 0x00, 0x00, 0x0B, 0xF3,
                                        0x00, 0x00, 0x07, 0x36, 0x02, 0x01, 0x62, 0x03, 0x2F, 0xCF};
+// 93/1 replies of the same pump around a power cut and an hour later: 1851 starts and 33645634 s, then 1850 starts
+// and 33641997 s, then 1855 starts and 33646190 s
+inline const Bytes REPLY_HISTORY_BEFORE_CUT = {0x24, 0x27, 0xF8, 0xE7, 0x0A, 0x23, 0x00, 0x00, 0xF8, 0x02, 0x00,
+                                               0x00, 0x1C, 0x00, 0x00, 0x07, 0x3B, 0x00, 0x02, 0x00, 0x03, 0x02,
+                                               0x01, 0x64, 0x42, 0x00, 0x00, 0x0E, 0x6B, 0x00, 0x00, 0x00, 0x83,
+                                               0x00, 0x00, 0x07, 0x36, 0x02, 0x01, 0x64, 0x93, 0x7B, 0xF9};
+inline const Bytes REPLY_HISTORY_AFTER_CUT = {0x24, 0x27, 0xF8, 0xE7, 0x0A, 0x23, 0x00, 0x00, 0xF8, 0x02, 0x00,
+                                              0x00, 0x1C, 0x00, 0x00, 0x07, 0x3A, 0x00, 0x01, 0x00, 0x01, 0x02,
+                                              0x01, 0x56, 0x0D, 0x00, 0x00, 0x00, 0x36, 0x00, 0x00, 0x00, 0x36,
+                                              0x00, 0x00, 0x07, 0x37, 0x02, 0x01, 0x56, 0x46, 0xD9, 0xBA};
+inline const Bytes REPLY_HISTORY_LATER = {0x24, 0x27, 0xF8, 0xE7, 0x0A, 0x23, 0x00, 0x00, 0xF8, 0x02, 0x00,
+                                          0x00, 0x1C, 0x00, 0x00, 0x07, 0x3F, 0x00, 0x02, 0x00, 0x03, 0x02,
+                                          0x01, 0x66, 0x6E, 0x00, 0x00, 0x10, 0x97, 0x00, 0x00, 0x0A, 0x63,
+                                          0x00, 0x00, 0x07, 0x3A, 0x02, 0x01, 0x67, 0x8D, 0x77, 0xA0};
+// 87/1 of the same pump about an hour after REPLY_ENERGY: 65.4814 kWh
+inline const Bytes REPLY_ENERGY_LATER = {0x24, 0x25, 0xF8, 0xE7, 0x0A, 0x21, 0x00, 0x00, 0xE8, 0x01, 0x00,
+                                         0x00, 0x1A, 0x41, 0xAC, 0x19, 0xFF, 0x3C, 0x72, 0xC8, 0xC0, 0x40,
+                                         0xB4, 0xD7, 0x00, 0x00, 0x01, 0x40, 0xB4, 0xD7, 0x00, 0x41, 0xAC,
+                                         0x19, 0xFF, 0x3C, 0x72, 0xC8, 0xC0, 0xD7, 0xA1};
 // 88/25 type 0x010A v1, 6 bytes: no warning, no alarm
 inline const Bytes REPLY_FAULT_NONE = {0x24, 0x11, 0xF8, 0xE7, 0x0A, 0x0D, 0x00, 0x01, 0x0A, 0x01, 0x00,
                                        0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7, 0x4C};
@@ -171,6 +190,58 @@ TEST_F(GrundfosAlphaDiagnosticsTest, MissingObjectIsSkippedUntilReconnect) {
   this->bus_.lose_connection();
   this->bus_.establish_connection();
   EXPECT_EQ(this->next_request_(), FRAME_ENERGY);
+}
+
+TEST_F(GrundfosAlphaDiagnosticsTest, CountersHoldTheirHighestValueAfterAPowerCut) {
+  this->pump_.set_energy_sensor(nullptr);
+  this->pump_.set_warning_code_sensor(nullptr);
+  this->pump_.set_alarm_code_sensor(nullptr);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  this->reply_(REPLY_HISTORY_BEFORE_CUT);
+  EXPECT_FLOAT_EQ(this->starts_.state, 1851.0f);
+  // The power cut drops the connection; the pump comes back with lower counters
+  this->bus_.lose_connection();
+  EXPECT_TRUE(std::isnan(this->starts_.state));
+  this->bus_.establish_connection();
+  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  this->reply_(REPLY_HISTORY_AFTER_CUT);
+  EXPECT_FLOAT_EQ(this->starts_.state, 1851.0f);
+  EXPECT_NEAR(this->operating_hours_.state, 33645634.0f / 3600.0f, 0.01f);
+  // Once the counters pass the held values, they are published again
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  this->reply_(REPLY_HISTORY_LATER);
+  EXPECT_FLOAT_EQ(this->starts_.state, 1855.0f);
+  EXPECT_NEAR(this->operating_hours_.state, 33646190.0f / 3600.0f, 0.01f);
+}
+
+TEST_F(GrundfosAlphaDiagnosticsTest, EnergyHoldsItsHighestValue) {
+  this->pump_.set_operating_hours_sensor(nullptr);
+  this->pump_.set_starts_sensor(nullptr);
+  this->pump_.set_warning_code_sensor(nullptr);
+  this->pump_.set_alarm_code_sensor(nullptr);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
+  this->reply_(REPLY_ENERGY_LATER);
+  EXPECT_NEAR(this->energy_.state, 65.4814f, 0.0005f);
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
+  this->reply_(REPLY_ENERGY);
+  EXPECT_NEAR(this->energy_.state, 65.4814f, 0.0005f);
+}
+
+TEST_F(GrundfosAlphaDiagnosticsTest, FaultCodesFallBackToZero) {
+  this->read_all_(REPLY_FAULT_ACTIVE);
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
+  this->reply_(REPLY_ENERGY);
+  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  this->reply_(REPLY_HISTORY);
+  ASSERT_EQ(this->next_request_(), FRAME_FAULT);
+  this->reply_(REPLY_FAULT_NONE);
+  EXPECT_FLOAT_EQ(this->warning_code_.state, 0.0f);
+  EXPECT_FLOAT_EQ(this->alarm_code_.state, 0.0f);
 }
 
 TEST_F(GrundfosAlphaDiagnosticsTest, DisconnectGivesNan) {

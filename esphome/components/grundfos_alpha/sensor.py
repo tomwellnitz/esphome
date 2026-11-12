@@ -42,6 +42,8 @@ CONF_OPERATING_HOURS = "operating_hours"
 CONF_STARTS = "starts"
 CONF_WARNING_CODE = "warning_code"
 
+ICON_FAULT_CODE = "mdi:alert-circle-outline"
+
 
 def _schema(unit: str, decimals: int, device_class: str | None = None) -> cv.Schema:
     return sensor.sensor_schema(
@@ -66,6 +68,7 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_CURRENT): _schema(UNIT_AMPERE, 3, DEVICE_CLASS_CURRENT),
         cv.Optional(CONF_POWER): _schema(UNIT_WATT, 1, DEVICE_CLASS_POWER),
         cv.Optional(CONF_SPEED): _schema(UNIT_REVOLUTIONS_PER_MINUTE, 0),
+        # The counters can fall back after a power cut; the component holds the highest value (see publish_)
         cv.Optional(CONF_ENERGY): sensor.sensor_schema(
             unit_of_measurement=UNIT_KILOWATT_HOURS,
             accuracy_decimals=3,
@@ -85,11 +88,14 @@ CONFIG_SCHEMA = cv.Schema(
             state_class=STATE_CLASS_TOTAL_INCREASING,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        # Grundfos fault codes, 0 = no fault
         cv.Optional(CONF_WARNING_CODE): sensor.sensor_schema(
+            icon=ICON_FAULT_CODE,
             accuracy_decimals=0,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
         cv.Optional(CONF_ALARM_CODE): sensor.sensor_schema(
+            icon=ICON_FAULT_CODE,
             accuracy_decimals=0,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),

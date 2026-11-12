@@ -33,33 +33,36 @@ static constexpr float WATT_SECONDS_PER_KILOWATT_HOUR = 3.6e6f;
 // 93/289, type 0x0130 v1: pump_flow (m³/s), pump_differential_pressure (Pa), inlet_pressure, outlet_pressure,
 // media_temperature, differential_temperature
 static constexpr Field ALPHA3_PROCESS_FIELDS[] = {
-    {Reading::READING_FLOW, 0, SECONDS_PER_HOUR},
-    {Reading::READING_HEAD, 4, 1.0f / PASCAL_PER_METER},
-    {Reading::READING_MEDIUM_TEMPERATURE, 16, 1.0f},  // °C, unlike the SI units of the other fields
+    {Reading::READING_FLOW, 0, FieldFormat::FIELD_FORMAT_FLOAT, SECONDS_PER_HOUR},
+    {Reading::READING_HEAD, 4, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f / PASCAL_PER_METER},
+    // °C, unlike the SI units of the other fields
+    {Reading::READING_MEDIUM_TEMPERATURE, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
 // 87/69, type 0x0100 v1: grid_voltage, dc_link_voltage, current, power_consumption, dc_power_consumption,
 // absolute_speed (rpm), three temperatures, pwm_type
 static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
-    {Reading::READING_VOLTAGE, 0, 1.0f},
-    {Reading::READING_CURRENT, 8, 1.0f},
+    {Reading::READING_VOLTAGE, 0, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+    {Reading::READING_CURRENT, 8, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
     // dc_power_consumption: the app shows it as the power (widget_configuration_52_1_0.xml); alpha3 reads offset 12
-    {Reading::READING_POWER, 16, 1.0f},
-    {Reading::READING_SPEED, 20, 1.0f},
+    {Reading::READING_POWER, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+    {Reading::READING_SPEED, 20, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
-// 87/1, type 0x00E8 v1: system_energy (double, Ws), system_power, then a counted list of one entry per pump
+// 87/1, type 0x00E8 v1: system_energy (double, Ws), system_power, then a counted list of one entry per pump.
+// Whether system_energy also falls back after a power cut is not known yet; it is held like 93/1 (see publish_).
 static constexpr Field ALPHA3_ENERGY_FIELDS[] = {
-    {Reading::READING_ENERGY, 0, 1.0f / WATT_SECONDS_PER_KILOWATT_HOUR, FieldFormat::FIELD_FORMAT_DOUBLE},
+    {Reading::READING_ENERGY, 0, FieldFormat::FIELD_FORMAT_DOUBLE, 1.0f / WATT_SECONDS_PER_KILOWATT_HOUR},
 };
-// 93/1, type 0x00F8 v2: starts (u32), starts_last_hour (u16), starts_last24hrs (u16), operating_time (u32, s),
-// operating_time_last_24hrs, last_operating_time, power_up_counter, power_on_time
+// 93/1, type 0x00F8 v2: starts (u32), starts_last_hour (u16), starts_last24hrs (u16), operating_time (u32, s, total),
+// operating_time_last_24hrs, last_operating_time, power_up_counter, power_on_time. The pump stores starts and
+// operating_time only now and then: after a power cut a real ALPHA3 reported one start and 3637 s less than before.
 static constexpr Field ALPHA3_HISTORY_FIELDS[] = {
-    {Reading::READING_OPERATING_HOURS, 8, 1.0f / SECONDS_PER_HOUR, FieldFormat::FIELD_FORMAT_UINT32},
-    {Reading::READING_STARTS, 0, 1.0f, FieldFormat::FIELD_FORMAT_UINT32},
+    {Reading::READING_OPERATING_HOURS, 8, FieldFormat::FIELD_FORMAT_UINT32, 1.0f / SECONDS_PER_HOUR},
+    {Reading::READING_STARTS, 0, FieldFormat::FIELD_FORMAT_UINT32, 1.0f},
 };
 // 88/25, type 0x010A v1: warn_code, alarm_code, highest_prioritized_error_code (u16 each, 0 = no fault)
 static constexpr Field ALPHA3_FAULT_FIELDS[] = {
-    {Reading::READING_WARNING_CODE, 0, 1.0f, FieldFormat::FIELD_FORMAT_UINT16},
-    {Reading::READING_ALARM_CODE, 2, 1.0f, FieldFormat::FIELD_FORMAT_UINT16},
+    {Reading::READING_WARNING_CODE, 0, FieldFormat::FIELD_FORMAT_UINT16, 1.0f},
+    {Reading::READING_ALARM_CODE, 2, FieldFormat::FIELD_FORMAT_UINT16, 1.0f},
 };
 static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
     {93, 289, 0x0130, 1, 24, ALPHA3_PROCESS_FIELDS},  // process values
@@ -419,6 +422,14 @@ bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
 
 void GrundfosAlpha::publish_(Reading reading, float value) {
 #ifdef USE_SENSOR
+  // A counter that falls back after a power cut keeps its highest value until it passes it again, so that
+  // total_increasing sensors do not go down. A restart of the ESP forgets the highest values.
+  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_ENERGY);
+  if (total < this->totals_.size() && !std::isnan(value)) {
+    if (value < this->totals_[total])
+      value = this->totals_[total];
+    this->totals_[total] = value;
+  }
   PUBLISH_STATE(this->sensor_(reading), value);
 #endif
 }
