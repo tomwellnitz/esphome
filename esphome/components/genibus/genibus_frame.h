@@ -28,6 +28,8 @@ static constexpr uint8_t APDU_LENGTH_MASK = 0x3F;
 
 // status, type (2), version, size (3)
 static constexpr size_t DATA_OBJECT_HEADER_SIZE = 7;
+// object, sub ID (2), type (2), version, size (3)
+static constexpr size_t SET_OBJECT_HEADER_SIZE = 9;
 
 /// CRC-16/GENIBUS of LE up to the last data byte.
 uint16_t frame_crc(const uint8_t *data, size_t len);
@@ -37,6 +39,13 @@ size_t build_request(std::span<uint8_t> out, uint8_t destination, uint8_t source
 
 /// Write a class 10 GET APDU of object/sub_id (5 bytes) and return the pointer past it.
 uint8_t *put_get_object(uint8_t *dst, uint8_t object, uint16_t sub_id);
+/// Write a class 10 SET APDU of object/sub_id (11 bytes plus the body) and return the pointer past it. type and
+/// version are those the device reported for the object; body.size() must not exceed
+/// APDU_LENGTH_MASK - SET_OBJECT_HEADER_SIZE.
+uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
+                        std::span<const uint8_t> body);
+/// Write a class 3 SET APDU of one command (3 bytes) and return the pointer past it.
+uint8_t *put_command(uint8_t *dst, uint8_t command);
 
 /// One APDU; data points into the frame.
 struct Apdu {
