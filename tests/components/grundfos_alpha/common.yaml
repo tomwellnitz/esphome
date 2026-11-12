@@ -45,3 +45,13 @@ select:
       name: Pump control mode
     operating_mode:
       name: Pump operating mode
+
+number:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    constant_pressure_setpoint:
+      name: Pump constant pressure set point
+    proportional_pressure_setpoint:
+      name: Pump proportional pressure set point
+    constant_speed_setpoint:
+      name: Pump constant speed set point
