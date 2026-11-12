@@ -57,6 +57,7 @@ void GenibusBLE::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t g
       if (this->link_.up())
         this->status_clear_warning();
       ESP_LOGI(TAG, "[%s] Connected", this->parent_->address_str());
+      this->connection_established_();
       break;
     }
     case ESP_GATTC_NOTIFY_EVT: {
