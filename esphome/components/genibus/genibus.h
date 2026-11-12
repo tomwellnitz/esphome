@@ -79,8 +79,12 @@ class GenibusBus : public Component {
  protected:
   /// Write a whole frame; a transport that needs smaller pieces splits it.
   virtual bool write_frame(std::span<const uint8_t> frame) = 0;
+  /// Call when the connection is up, after is_connected() has started to return true: every device gets
+  /// on_connected() and may send its first request from there.
+  void connection_established_();
   /// Call when the connection drops, after is_connected() has started to return false: every open and waiting request
-  /// ends with GENIBUS_ERROR_DISCONNECTED, and requests sent from those callbacks are refused.
+  /// ends with GENIBUS_ERROR_DISCONNECTED, then every device gets on_disconnected(); requests sent from those callbacks
+  /// are refused. Calls after the first one until the next connection_established_() end requests only.
   void connection_lost_();
 
   void handle_frame_();
@@ -100,12 +104,17 @@ class GenibusBus : public Component {
   uint8_t master_address_{0};
   uint8_t active_address_{0};
   bool quiet_{false};
+  bool down_notified_{false};  // whether the devices have heard of the current loss of the connection
 };
 
 /// A device on the bus; it gets the answer to its request in on_response().
 class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
  public:
   virtual void on_response(const GenibusResponse &response) = 0;
+  /// The connection is up; a device may read at once instead of waiting for its next update().
+  virtual void on_connected() {}
+  /// The connection is down and every request of this device has ended; a device may mark its values unknown.
+  virtual void on_disconnected() {}
 
   void set_address(uint8_t address) { this->address_ = address; }
   uint8_t get_address() const { return this->address_; }

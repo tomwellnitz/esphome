@@ -41,6 +41,10 @@ class TestBus : public GenibusBus {
     this->connected = false;
     this->connection_lost_();
   }
+  void establish_connection() {
+    this->connected = true;
+    this->connection_established_();
+  }
 
   bool connected{true};
   bool write_ok{true};
@@ -68,11 +72,25 @@ class TestDevice : public GenibusDevice {
       this->sent_from_response = this->parent_->send(this, GET_POWER);
     }
   }
+  void on_connected() override {
+    this->connects++;
+    if (this->send_on_connect)
+      this->sent_on_connect = this->request_flow_head();
+  }
+  void on_disconnected() override {
+    this->disconnects++;
+    this->sent_on_disconnect = this->request_flow_head();
+  }
   bool request_flow_head() { return this->request_object_(93, 289); }
 
   std::vector<Received> responses;
+  int connects{0};
+  int disconnects{0};
   bool send_next{false};
   bool sent_from_response{false};
+  bool send_on_connect{false};
+  bool sent_on_connect{false};
+  bool sent_on_disconnect{false};
 };
 
 class GenibusBusTest : public ::testing::Test {
@@ -404,6 +422,36 @@ TEST_F(GenibusBusTest, TransportDownWithoutNoticeOnTheWire) {
   this->receive_(REPLY_FLOW_HEAD);
   ASSERT_EQ(this->pump_.responses.size(), 2u);
   EXPECT_EQ(this->pump_.responses[1].error, GenibusError::GENIBUS_ERROR_NONE);
+}
+
+TEST_F(GenibusBusTest, EveryDeviceHearsOfConnectionChanges) {
+  this->bus_.send(&this->pump_, GET_FLOW_HEAD);
+  this->bus_.lose_connection();
+  // The request ends before the device hears of the loss, and it cannot send from there
+  ASSERT_EQ(this->pump_.responses.size(), 1u);
+  EXPECT_EQ(this->pump_.disconnects, 1);
+  EXPECT_EQ(this->other_.disconnects, 1);
+  EXPECT_FALSE(this->pump_.sent_on_disconnect);
+  // A second notice of the same loss, here from the transport and the bus's own check, is not repeated
+  this->bus_.lose_connection();
+  this->run_();
+  EXPECT_EQ(this->pump_.disconnects, 1);
+  this->bus_.establish_connection();
+  EXPECT_EQ(this->pump_.connects, 1);
+  EXPECT_EQ(this->other_.connects, 1);
+  this->bus_.lose_connection();
+  EXPECT_EQ(this->pump_.disconnects, 2);
+  EXPECT_EQ(this->other_.disconnects, 2);
+}
+
+TEST_F(GenibusBusTest, DeviceCanSendFromOnConnected) {
+  this->bus_.connected = false;
+  this->pump_.send_on_connect = true;
+  this->bus_.establish_connection();
+  EXPECT_TRUE(this->pump_.sent_on_connect);
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0], FRAME_FLOW_HEAD);
 }
 
 TEST_F(GenibusBusTest, WriteFailureEndsTransaction) {

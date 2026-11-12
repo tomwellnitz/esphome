@@ -171,6 +171,17 @@ void GenibusBus::connection_lost_() {
     pending.size = 0;
     pending.device->on_response({GenibusError::GENIBUS_ERROR_DISCONNECTED, {}});
   }
+  if (this->down_notified_)
+    return;
+  this->down_notified_ = true;
+  for (auto &pending : this->pending_)
+    pending.device->on_disconnected();
+}
+
+void GenibusBus::connection_established_() {
+  this->down_notified_ = false;
+  for (auto &pending : this->pending_)
+    pending.device->on_connected();
 }
 
 bool GenibusDevice::request_object_(uint8_t object, uint16_t sub_id) {
