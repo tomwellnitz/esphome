@@ -205,4 +205,10 @@ bool GenibusDevice::send_command_(uint8_t command) {
   return this->parent_->send(this, apdu);
 }
 
+bool GenibusDevice::set_reference_(uint8_t id, uint8_t value) {
+  uint8_t apdu[4];
+  put_set_reference(apdu, id, value);
+  return this->parent_->send(this, apdu);
+}
+
 }  // namespace esphome::genibus
