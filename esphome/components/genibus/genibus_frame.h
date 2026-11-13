@@ -49,7 +49,8 @@ uint8_t *put_get_object(uint8_t *dst, uint8_t object, uint16_t sub_id);
 /// Write a class 10 SET APDU of object/sub_id (11 bytes plus the body) and return the pointer past it. type and
 /// version are those the device reported for the object; body.size() must not exceed
 /// APDU_LENGTH_MASK - SET_OBJECT_HEADER_SIZE. The 2005 specification does not describe class 10; this layout comes
-/// from recorded traffic of the Grundfos GO app and an open source ALPHA3 binding, not yet from a test on a pump.
+/// from recorded traffic of the Grundfos GO app and an open source ALPHA3 binding, and a real ALPHA3 acknowledged and
+/// stored such SETs (remote test, 12 Nov 2026).
 uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
                         std::span<const uint8_t> body);
 /// Write a class 3 SET APDU of one command (3 bytes) and return the pointer past it. Any command ID is accepted;
