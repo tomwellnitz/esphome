@@ -18,10 +18,8 @@ namespace esphome::genibus {
 static constexpr size_t MAX_REQUEST_SIZE = 32;
 // The largest object body a class 10 SET fits into one request
 static constexpr size_t MAX_SET_BODY_SIZE = MAX_REQUEST_SIZE - 2 - SET_OBJECT_HEADER_SIZE;
-// Measured on an ALPHA3: a request of 2, 3 or 4 APDUs gets one reply with all of them (4 class 10 GETs: 117 bytes);
-// with 5 to 8 APDUs, even of small objects, the pump does not answer, while a single SET of 35 bytes works.
-static constexpr size_t MAX_APDUS_PER_FRAME = 4;
-static_assert(MAX_APDUS_PER_FRAME * GET_OBJECT_SIZE <= MAX_REQUEST_SIZE, "The GETs of one frame must fit a request");
+// The most class 10 GETs one request holds. A device may answer fewer; it sets its own limit.
+static constexpr size_t MAX_GET_OBJECTS = MAX_REQUEST_SIZE / GET_OBJECT_SIZE;
 
 enum class GenibusError : uint8_t {
   GENIBUS_ERROR_NONE,
@@ -80,10 +78,9 @@ class GenibusBus : public Component {
   void register_device(GenibusDevice *device) { this->pending_.push_back({device, {}, 0}); }
 
   /// Queue the request of device. Returns false, queueing nothing, when the bus is not connected, the request is
-  /// empty, longer than MAX_REQUEST_SIZE, not whole APDUs or more than MAX_APDUS_PER_FRAME of them, the device is not
-  /// registered, or it already has a request open (see is_busy()). Every accepted request gets exactly one
-  /// on_response(); the device's slot is free again when on_response() runs, so it may send its next request from
-  /// there.
+  /// empty or longer than MAX_REQUEST_SIZE, the device is not registered, or it already has a request open (see
+  /// is_busy()). Every accepted request gets exactly one on_response(); the device's slot is free again when
+  /// on_response() runs, so it may send its next request from there.
   bool send(GenibusDevice *device, std::span<const uint8_t> apdus);
   /// Whether device has a request waiting or on the wire.
   bool is_busy(const GenibusDevice *device) const;
@@ -141,8 +138,9 @@ class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
     const ObjectId id{object, sub_id};
     return this->request_objects_({&id, 1});
   }
-  /// Send a class 10 GET of up to MAX_APDUS_PER_FRAME objects in one frame; the reply has an APDU per object, in
-  /// this order (see GenibusResponse::part()). False, sending nothing, when there are none or too many.
+  /// Send a class 10 GET of up to MAX_GET_OBJECTS objects in one frame; the reply has an APDU per object, in this
+  /// order (see GenibusResponse::part()). False, sending nothing, when there are none or too many. Not every device
+  /// answers that many in one request; the device component knows its limit.
   bool request_objects_(std::span<const ObjectId> objects);
   /// Send a class 10 SET of object/sub_id; false, sending nothing, when the body is empty or longer than
   /// MAX_SET_BODY_SIZE, or when send() refuses it.

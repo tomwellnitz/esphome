@@ -31,15 +31,6 @@ bool GenibusBus::send(GenibusDevice *device, std::span<const uint8_t> apdus) {
     ESP_LOGE(TAG, "Request of %u bytes not sent", static_cast<unsigned>(apdus.size()));
     return false;
   }
-  ApduReader reader(apdus);
-  Apdu apdu{};
-  size_t count = 0;
-  while (reader.next(apdu))
-    count++;
-  if (!reader.at_end() || count > MAX_APDUS_PER_FRAME) {
-    ESP_LOGE(TAG, "Request of %u APDUs not sent", static_cast<unsigned>(count));
-    return false;
-  }
   if (!this->is_connected() || this->active_ == device)
     return false;
   for (auto &pending : this->pending_) {
@@ -205,9 +196,9 @@ GenibusResponse GenibusResponse::part(size_t index) const {
 }
 
 bool GenibusDevice::request_objects_(std::span<const ObjectId> objects) {
-  if (objects.empty() || objects.size() > MAX_APDUS_PER_FRAME)
+  if (objects.empty() || objects.size() > MAX_GET_OBJECTS)
     return false;
-  uint8_t apdus[MAX_APDUS_PER_FRAME * GET_OBJECT_SIZE];
+  uint8_t apdus[MAX_GET_OBJECTS * GET_OBJECT_SIZE];
   uint8_t *end = apdus;
   for (const auto &id : objects)
     end = put_get_object(end, id.object, id.sub_id);

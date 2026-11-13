@@ -543,20 +543,15 @@ TEST_F(GenibusBusTest, ResponsePartKeepsTheError) {
   EXPECT_TRUE(response.part(0).apdus.empty());
 }
 
-// A real ALPHA3 does not answer a request of 5 to 8 APDUs, of any size
-TEST_F(GenibusBusTest, RefusesMoreApdusThanTheDeviceAnswers) {
-  const ObjectId five[] = {{93, 289}, {87, 69}, {86, 8}, {86, 10}, {86, 100}};
-  EXPECT_FALSE(this->pump_.request_objects(five));
+TEST_F(GenibusBusTest, ObjectGetsMustFitOneRequest) {
+  const ObjectId objects[] = {{93, 289}, {87, 69}, {86, 8}, {86, 10}, {86, 100}, {86, 15}, {86, 16}};
   EXPECT_FALSE(this->pump_.request_objects({}));
-  Bytes five_gets;
-  for (int i = 0; i < 5; i++)
-    five_gets.insert(five_gets.end(), GET_POWER.begin(), GET_POWER.end());
-  EXPECT_FALSE(this->bus_.send(&this->pump_, five_gets));
-  // A request must be whole APDUs
-  EXPECT_FALSE(this->bus_.send(&this->pump_, Bytes(GET_POWER.begin(), GET_POWER.end() - 1)));
+  EXPECT_FALSE(this->pump_.request_objects({objects, MAX_GET_OBJECTS + 1}));
   EXPECT_FALSE(this->bus_.is_busy(&this->pump_));
+  EXPECT_TRUE(this->pump_.request_objects({objects, MAX_GET_OBJECTS}));
   this->run_();
-  EXPECT_TRUE(this->bus_.written.empty());
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0].size(), MAX_GET_OBJECTS * GET_OBJECT_SIZE + FRAME_OVERHEAD + 2);
 }
 
 TEST_F(GenibusBusTest, RefusesBadRequests) {
