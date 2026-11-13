@@ -13,6 +13,8 @@ from esphome.components.grundfos_alpha.sensor import (
 )
 from esphome.components.grundfos_alpha.switch import (
     CONF_AUTOMATIC_NIGHT_SETBACK,
+    CONF_CLOCK_PROGRAM,
+    CONF_PUMP_KICK,
     CONFIG_SCHEMA as SWITCH_SCHEMA,
 )
 from esphome.config import Config
@@ -25,6 +27,8 @@ from esphome.const import (
     CONF_UPDATE_INTERVAL,
 )
 from esphome.core import ID
+
+SWITCHES = [CONF_AUTOMATIC_NIGHT_SETBACK, CONF_PUMP_KICK, CONF_CLOCK_PROGRAM]
 
 
 @pytest.mark.parametrize("value", ["5s", "30s", "10min"])
@@ -49,6 +53,7 @@ def test_schema_uses_the_checked_update_interval() -> None:
     assert CONFIG_SCHEMA.schema[keys[0]] is validate_update_interval
 
 
+@pytest.mark.parametrize("switch", SWITCHES)
 @pytest.mark.parametrize(
     ("key", "value"),
     [
@@ -58,16 +63,22 @@ def test_schema_uses_the_checked_update_interval() -> None:
         (CONF_INITIAL_STATE, True),
     ],
 )
-def test_switch_rejects_restore_options(key: str, value: object) -> None:
-    schema = SWITCH_SCHEMA.schema[CONF_AUTOMATIC_NIGHT_SETBACK]
+def test_switch_rejects_restore_options(switch: str, key: str, value: object) -> None:
+    schema = SWITCH_SCHEMA.schema[switch]
     with pytest.raises(cv.Invalid, match="Not supported"):
-        schema({"name": "Night setback", key: value})
+        schema({"name": "Pump", key: value})
 
 
-def test_switch_does_not_restore() -> None:
-    schema = SWITCH_SCHEMA.schema[CONF_AUTOMATIC_NIGHT_SETBACK]
-    config = schema({"name": "Night setback"})
+@pytest.mark.parametrize("switch", SWITCHES)
+def test_switch_does_not_restore(switch: str) -> None:
+    config = SWITCH_SCHEMA.schema[switch]({"name": "Pump"})
     assert str(config[CONF_RESTORE_MODE]) == "DISABLED"
+
+
+@pytest.mark.parametrize("switch", SWITCHES)
+def test_switch_rejects_inverted(switch: str) -> None:
+    with pytest.raises(cv.Invalid):
+        SWITCH_SCHEMA.schema[switch]({"name": "Pump", "inverted": True})
 
 
 def _set_hub(hub: dict) -> None:

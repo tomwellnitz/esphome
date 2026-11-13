@@ -94,6 +94,10 @@ number:
       name: Pump underfloor heating set point
     autoadapt_radiator_and_underfloor_setpoint:
       name: Pump radiator and underfloor heating set point
+    pump_kick_wait:
+      name: Pump kick wait
+    pump_kick_duration:
+      name: Pump kick duration
 
 button:
   - platform: grundfos_alpha
@@ -116,3 +120,7 @@ switch:
     grundfos_alpha_id: grundfos_alpha_pump
     automatic_night_setback:
       name: Pump automatic night setback
+    pump_kick:
+      name: Pump kick
+    clock_program:
+      name: Pump clock program

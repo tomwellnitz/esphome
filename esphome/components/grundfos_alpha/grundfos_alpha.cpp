@@ -83,6 +83,9 @@ static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
 // operation mode configuration: byte 1 local_operation_mode. Type 0x012D factory configuration: default, min, max
 // set point (floats), ... Type 0x012E user configuration: feedback_id (u16), local_set_point (float), PID values.
 // Type 0x014D AutoNight enable: 0 off, 1 on.
+// Type 0x00E5 automatic test run configuration: enabled (bit 0), time_without_activity (u32, s),
+// duration_of_testrun_in_secs (u16). Type 0x00DA clock program overview: four maximum counts, clock_program_enabled
+// (byte 4, bit 0), default_action, base_set_point (float).
 static constexpr SettingLayouts ALPHA3_SETTINGS = {{
     {86, 8, 0x012F, 1, 7},
     {86, 10, 0x012F, 1, 7},
@@ -100,8 +103,10 @@ static constexpr SettingLayouts ALPHA3_SETTINGS = {{
     {86, 23, 0x012D, 1, 28},
     {86, 24, 0x012E, 1, 18},
     {90, 8, 0x014D, 1, 1},
+    {86, 2, 0x00E5, 2, 7},
+    {84, 1, 0x00DA, 1, 10},
 }};
-static_assert(static_cast<size_t>(Setting::SETTING_COUNT) <= 16, "last_known_ has a bit per setting");
+static_assert(static_cast<size_t>(Setting::SETTING_COUNT) <= 32, "last_known_ has a bit per setting");
 
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
 // Add a model only after it was tested on a real pump
@@ -142,6 +147,11 @@ static float read_field(const Field &field, std::span<const uint8_t> body) {
   }
   return read_float(at);
 }
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
+static uint32_t read_unsigned(const uint8_t *at, uint8_t width) {
+  return width == 4 ? encode_uint32(at[0], at[1], at[2], at[3]) : encode_uint16(at[0], at[1]);
+}
+#endif
 
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
 #if defined(USE_TEXT_SENSOR) || defined(USE_GRUNDFOS_ALPHA_WRITE)
@@ -201,20 +211,38 @@ static constexpr NumberLayout NUMBERS[] = {
     {Setting::SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR, Setting::SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR_LIMITS,
      PASCAL_PER_METER, OUTSIDE_AUTOADAPT},
 };
-static_assert(std::size(NUMBERS) == static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT));
+static_assert(std::size(NUMBERS) == SET_POINT_COUNT, "NUMBERS has an entry per set point");
+
+/// An unsigned big-endian field of 86/2 behind a number, and the seconds in one unit of the entity.
+struct PumpKickNumber {
+  uint8_t offset;
+  uint8_t width;
+  float seconds_per_unit;
+};
+// The time without activity (u32) in hours and the duration of the test run (u16) in seconds
+static constexpr PumpKickNumber PUMP_KICK_NUMBERS[] = {{1, 4, SECONDS_PER_HOUR}, {5, 2, 1.0f}};
+static_assert(SET_POINT_COUNT + std::size(PUMP_KICK_NUMBERS) ==
+                  static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT),
+              "PUMP_KICK_NUMBERS has an entry per pump kick number");
+#endif
+
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+// The bools behind the switches, bit 0 of the byte: 86/2 enabled and 84/1 clock_program_enabled
+static constexpr uint8_t OFFSET_PUMP_KICK_ENABLED = 0;
+static constexpr uint8_t OFFSET_CLOCK_PROGRAM_ENABLED = 4;
 #endif
 
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
 /// The bits of last_known_ for the set point limits, which do not change.
-static constexpr uint16_t limit_bits() {
-  uint16_t bits = 0;
+static constexpr uint32_t limit_bits() {
+  uint32_t bits = 0;
 #ifdef USE_NUMBER
   for (const auto &layout : NUMBERS)
     bits |= 1u << static_cast<size_t>(layout.limits);
 #endif
   return bits;
 }
-static constexpr uint16_t LIMIT_BITS = limit_bits();
+static constexpr uint32_t LIMIT_BITS = limit_bits();
 #endif
 
 #ifdef USE_TEXT_SENSOR
@@ -349,6 +377,12 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "AutoAdapt radiator set point", this->numbers_[3]);
   LOG_NUMBER("  ", "AutoAdapt underfloor heating set point", this->numbers_[4]);
   LOG_NUMBER("  ", "AutoAdapt radiator and underfloor heating set point", this->numbers_[5]);
+  LOG_NUMBER("  ", "Pump kick wait", this->numbers_[6]);
+  LOG_NUMBER("  ", "Pump kick duration", this->numbers_[7]);
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  LOG_SWITCH("  ", "Pump kick", this->pump_kick_switch_);
+  LOG_SWITCH("  ", "Clock program", this->clock_program_switch_);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
   LOG_BUTTON("  ", "Start", this->start_button_);
@@ -689,6 +723,16 @@ bool GrundfosAlpha::wants_setting_(Setting setting) const {
         (NUMBERS[i].limits == setting && (this->last_known_ & (1u << static_cast<size_t>(setting))) == 0))
       return true;
   }
+  if (setting == Setting::SETTING_PUMP_KICK &&
+      std::any_of(this->numbers_.begin() + SET_POINT_COUNT, this->numbers_.end(),
+                  [](const number::Number *entity) { return entity != nullptr; }))
+    return true;
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  if (setting == Setting::SETTING_PUMP_KICK && this->pump_kick_switch_ != nullptr)
+    return true;
+  if (setting == Setting::SETTING_CLOCK_PROGRAM && this->clock_program_switch_ != nullptr)
+    return true;
 #endif
   return false;
 }
@@ -769,6 +813,19 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
       this->max_[i] = read_float(&body[OFFSET_MAX]);
     }
   }
+  if (setting == Setting::SETTING_PUMP_KICK) {
+    for (size_t i = 0; i < std::size(PUMP_KICK_NUMBERS); i++) {
+      const PumpKickNumber &layout = PUMP_KICK_NUMBERS[i];
+      PUBLISH_STATE(this->numbers_[SET_POINT_COUNT + i],
+                    read_unsigned(&body[layout.offset], layout.width) / layout.seconds_per_unit);
+    }
+  }
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  if (setting == Setting::SETTING_PUMP_KICK)
+    PUBLISH_STATE(this->pump_kick_switch_, (body[OFFSET_PUMP_KICK_ENABLED] & 0x01) != 0);
+  if (setting == Setting::SETTING_CLOCK_PROGRAM)
+    PUBLISH_STATE(this->clock_program_switch_, (body[OFFSET_CLOCK_PROGRAM_ENABLED] & 0x01) != 0);
 #endif
 }
 #endif
@@ -931,8 +988,25 @@ void GrundfosAlpha::decode_event_(const genibus::GenibusResponse &response) {
 #ifdef USE_NUMBER
 void GrundfosAlpha::write_number(NumberSetting setting, float value) {
   const size_t i = static_cast<size_t>(setting);
-  if (i >= std::size(NUMBERS))
+  if (i >= this->numbers_.size())
     return;
+  if (i >= SET_POINT_COUNT) {
+    // Without its entity 86/2 is not polled, and the write would wait for ever
+    if (this->numbers_[i] == nullptr)
+      return;
+    // The pump reports no limits for these: keep to the entity's range
+    const number::NumberTraits &traits = this->numbers_[i]->traits;
+    if (std::isnan(value) || value < traits.get_min_value() || value > traits.get_max_value()) {
+      ESP_LOGW(TAG, "Pump kick value %.0f not written: outside %.0f to %.0f", value, traits.get_min_value(),
+               traits.get_max_value());
+      return;
+    }
+    const PumpKickNumber &layout = PUMP_KICK_NUMBERS[i - SET_POINT_COUNT];
+    this->enqueue_({Setting::SETTING_PUMP_KICK, layout.offset, layout.width,
+                    static_cast<uint32_t>(lroundf(value * layout.seconds_per_unit)), Command::COMMAND_NONE},
+                   LOG_STR("Pump kick"));
+    return;
+  }
   const float raw = value * NUMBERS[i].raw_per_unit;
   if ((this->last_known_ & (1u << static_cast<size_t>(NUMBERS[i].limits))) == 0 || std::isnan(this->min_[i]) ||
       std::isnan(this->max_[i])) {
@@ -945,13 +1019,32 @@ void GrundfosAlpha::write_number(NumberSetting setting, float value) {
              this->max_[i] / NUMBERS[i].raw_per_unit);
     return;
   }
-  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 0, true, raw, Command::COMMAND_NONE}, LOG_STR("Set point"));
+  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 4, bit_cast<uint32_t>(raw), Command::COMMAND_NONE},
+                 LOG_STR("Set point"));
+}
+#endif
+
+#ifdef USE_SWITCH
+// Without its entity the object is not polled, and the write would wait for ever
+void GrundfosAlpha::write_pump_kick(bool state) {
+  if (this->pump_kick_switch_ != nullptr) {
+    this->enqueue_({Setting::SETTING_PUMP_KICK, OFFSET_PUMP_KICK_ENABLED, WIDTH_BIT, state, Command::COMMAND_NONE},
+                   LOG_STR("Pump kick"));
+  }
+}
+
+void GrundfosAlpha::write_clock_program(bool state) {
+  if (this->clock_program_switch_ != nullptr) {
+    this->enqueue_(
+        {Setting::SETTING_CLOCK_PROGRAM, OFFSET_CLOCK_PROGRAM_ENABLED, WIDTH_BIT, state, Command::COMMAND_NONE},
+        LOG_STR("Clock program"));
+  }
 }
 #endif
 
 #ifdef USE_SWITCH
 void GrundfosAlpha::write_automatic_night_setback(bool state) {
-  this->enqueue_({Setting::SETTING_AUTOMATIC_NIGHT_SETBACK, 0, state, false, 0.0f, Command::COMMAND_NONE},
+  this->enqueue_({Setting::SETTING_AUTOMATIC_NIGHT_SETBACK, 0, 1, state, Command::COMMAND_NONE},
                  LOG_STR("Automatic night setback"));
 }
 #endif
@@ -962,10 +1055,9 @@ void GrundfosAlpha::write_select(SelectSetting setting, size_t index) {
   const std::span<const uint8_t> values = control ? std::span<const uint8_t>(CONTROL_MODES) : OPERATING_MODES;
   if (index >= values.size())
     return;
-  this->enqueue_(
-      {control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
-       control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index], false, 0.0f, Command::COMMAND_NONE},
-      control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
+  this->enqueue_({control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
+                  control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, 1, values[index], Command::COMMAND_NONE},
+                 control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
 }
 #endif
 
@@ -974,9 +1066,11 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
     ESP_LOGW(TAG, "%s not written: pump not connected or not supported", LOG_STR_ARG(what));
     return false;
   }
+  // One object can hold several values: only a write of the same value replaces a waiting one
   size_t slot = 0;
   while (slot < this->queued_ &&
-         (this->queue_[slot].setting != request.setting || this->queue_[slot].command != request.command))
+         (this->queue_[slot].setting != request.setting || this->queue_[slot].offset != request.offset ||
+          this->queue_[slot].command != request.command))
     slot++;
   if (slot < this->queued_) {
     ESP_LOGV(TAG, "Replacing a waiting write");
@@ -1000,7 +1094,7 @@ void GrundfosAlpha::send_command(Command command) {
     case Command::COMMAND_STOP:
     case Command::COMMAND_START:
     case Command::COMMAND_RESET_ALARM_LOG:
-      this->enqueue_({Setting::SETTING_COUNT, 0, 0, false, 0.0f, command}, LOG_STR("Command"));
+      this->enqueue_({Setting::SETTING_COUNT, 0, 0, 0, command}, LOG_STR("Command"));
       break;
     default:
       break;
@@ -1008,7 +1102,7 @@ void GrundfosAlpha::send_command(Command command) {
 }
 
 void GrundfosAlpha::write_air_venting(bool on) {
-  this->enqueue_({Setting::SETTING_COUNT, 0, on, false, 0.0f, Command::COMMAND_AIR_VENTING}, LOG_STR("Air venting"));
+  this->enqueue_({Setting::SETTING_COUNT, 0, 0, on, Command::COMMAND_AIR_VENTING}, LOG_STR("Air venting"));
 }
 
 bool GrundfosAlpha::start_job_() {
@@ -1027,7 +1121,7 @@ bool GrundfosAlpha::start_job_() {
       if (this->job_.command == Command::COMMAND_AIR_VENTING) {
         // Class 5 SET of one value; the only class 5 value written
         const uint8_t apdu[] = {CLASS_REFERENCE, genibus::OPERATION_SET | 2, REFERENCE_AIR_VENTING,
-                                this->job_.byte_value};
+                                static_cast<uint8_t>(this->job_.value)};
         sent = this->parent_->send(this, apdu);
       } else {
         sent = this->send_command_(static_cast<uint8_t>(this->job_.command));
@@ -1084,7 +1178,7 @@ const LogString *GrundfosAlpha::job_refusal_() const {
 bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
   if (request.setting == Setting::SETTING_COUNT)
     return true;  // a command reads nothing first
-  uint16_t needed = 1u << static_cast<size_t>(request.setting);
+  uint32_t needed = 1u << static_cast<size_t>(request.setting);
   // The operating mode is checked against the control mode, when that is polled
   if (request.setting == Setting::SETTING_OPERATING_MODE && this->wants_setting_(Setting::SETTING_CONTROL_MODE))
     needed |= 1u << static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
@@ -1111,17 +1205,30 @@ const SettingLayout &GrundfosAlpha::job_layout_() const {
 }
 
 void GrundfosAlpha::apply_job_() {
-  if (this->job_.is_float) {
-    put_be32(&this->job_body_[this->job_.offset], bit_cast<uint32_t>(this->job_.float_value));
-  } else {
-    this->job_body_[this->job_.offset] = this->job_.byte_value;
+  uint8_t *at = &this->job_body_[this->job_.offset];
+  switch (this->job_.width) {
+    case WIDTH_BIT:
+      *at = (*at & 0xFE) | (this->job_.value & 0x01);
+      break;
+    case 1:
+      *at = static_cast<uint8_t>(this->job_.value);
+      break;
+    case 2:
+      put_be16(at, static_cast<uint16_t>(this->job_.value));
+      break;
+    default:
+      put_be32(at, this->job_.value);
+      break;
   }
 }
 
 bool GrundfosAlpha::same_outside_value_(std::span<const uint8_t> body) const {
-  const size_t width = this->job_.is_float ? 4 : 1;
+  const size_t width = this->job_.width == WIDTH_BIT ? 1 : this->job_.width;
   for (size_t i = 0; i < body.size(); i++) {
-    if ((i < this->job_.offset || i >= this->job_.offset + width) && body[i] != this->job_body_[i])
+    uint8_t changes = 0;  // the bits the job writes
+    if (i >= this->job_.offset && i < this->job_.offset + width)
+      changes = this->job_.width == WIDTH_BIT ? 0x01 : 0xFF;
+    if (((body[i] ^ this->job_body_[i]) & ~changes) != 0)
       return false;
   }
   return true;
@@ -1246,7 +1353,7 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
     // A write or command can change other objects too (a control mode write changes 86/100 byte 2): the next write
     // of one of them waits until it was polled again, so its read is not checked against an old poll. A failed job
     // clears its own bit too, even after a fresh read-back; a new write then waits for the next poll.
-    uint16_t keep = LIMIT_BITS;
+    uint32_t keep = LIMIT_BITS;
     if (failure == nullptr && this->job_.setting != Setting::SETTING_COUNT)
       keep |= 1u << static_cast<size_t>(this->job_.setting);
     this->last_known_ &= keep;
