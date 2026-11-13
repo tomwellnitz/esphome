@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -34,12 +35,27 @@ enum class Reading : uint8_t {
   READING_CURRENT,
   READING_POWER,
   READING_SPEED,
+  // Counters that only grow; keep them together and READING_ENERGY first (see totals_)
+  READING_ENERGY,
+  READING_OPERATING_HOURS,
+  READING_STARTS,
+  READING_WARNING_CODE,
+  READING_ALARM_CODE,
 };
 
-/// A big-endian float at offset in the body of an object, multiplied by factor before it is published.
+/// How a field is stored in the body; all are big-endian.
+enum class FieldFormat : uint8_t {
+  FIELD_FORMAT_FLOAT,
+  FIELD_FORMAT_DOUBLE,
+  FIELD_FORMAT_UINT16,
+  FIELD_FORMAT_UINT32,
+};
+
+/// A value at offset in the body of an object, multiplied by factor before it is published.
 struct Field {
   Reading reading;
   uint8_t offset;
+  FieldFormat format;
   float factor;
 };
 
@@ -161,6 +177,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   SUB_SENSOR(current)
   SUB_SENSOR(power)
   SUB_SENSOR(speed)
+  SUB_SENSOR(energy)
+  SUB_SENSOR(operating_hours)
+  SUB_SENSOR(starts)
+  SUB_SENSOR(warning_code)
+  SUB_SENSOR(alarm_code)
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   SUB_TEXT_SENSOR(operating_mode)
@@ -261,6 +282,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   uint8_t missing_{0};  // a bit per object index the pump does not have
   bool unsupported_{false};
   bool has_values_{false};
+#ifdef USE_SENSOR
+  // The highest value published per counter, from READING_ENERGY to READING_STARTS
+  std::array<float, static_cast<size_t>(Reading::READING_STARTS) - static_cast<size_t>(Reading::READING_ENERGY) + 1>
+      totals_{NAN, NAN, NAN};
+#endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   // The latest event of the log the last event sensor was set for; NO_EVENT_SHOWN before it was set
   uint32_t event_shown_{NO_EVENT_SHOWN};

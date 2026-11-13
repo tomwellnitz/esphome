@@ -26,6 +26,7 @@ static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING | WARNE
 // pressure set point (86/15: 19608, 39216, 58824 Pa) are whole multiples of 9804. The alpha3 component uses 10000.
 static constexpr float PASCAL_PER_METER = 9804.0f;
 static constexpr float SECONDS_PER_HOUR = 3600.0f;
+static constexpr float WATT_SECONDS_PER_KILOWATT_HOUR = 3.6e6f;
 
 // Object layouts and field names from the Grundfos GENI profile in the Grundfos GO app 8.5.2
 // (ALPHA3 Model B: profile 52_1_0, version V01.11.00.00037). The alpha3 component reads the same requests,
@@ -33,22 +34,43 @@ static constexpr float SECONDS_PER_HOUR = 3600.0f;
 // 93/289, type 0x0130 v1: pump_flow (m³/s), pump_differential_pressure (Pa), inlet_pressure, outlet_pressure,
 // media_temperature, differential_temperature
 static constexpr Field ALPHA3_PROCESS_FIELDS[] = {
-    {Reading::READING_FLOW, 0, SECONDS_PER_HOUR},
-    {Reading::READING_HEAD, 4, 1.0f / PASCAL_PER_METER},
-    {Reading::READING_MEDIUM_TEMPERATURE, 16, 1.0f},  // °C, unlike the SI units of the other fields
+    {Reading::READING_FLOW, 0, FieldFormat::FIELD_FORMAT_FLOAT, SECONDS_PER_HOUR},
+    {Reading::READING_HEAD, 4, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f / PASCAL_PER_METER},
+    // °C, unlike the SI units of the other fields
+    {Reading::READING_MEDIUM_TEMPERATURE, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
 // 87/69, type 0x0100 v1: grid_voltage, dc_link_voltage, current, power_consumption, dc_power_consumption,
 // absolute_speed (rpm), three temperatures, pwm_type
 static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
-    {Reading::READING_VOLTAGE, 0, 1.0f},
-    {Reading::READING_CURRENT, 8, 1.0f},
+    {Reading::READING_VOLTAGE, 0, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+    {Reading::READING_CURRENT, 8, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
     // dc_power_consumption: the app shows it as the power (widget_configuration_52_1_0.xml); alpha3 reads offset 12
-    {Reading::READING_POWER, 16, 1.0f},
-    {Reading::READING_SPEED, 20, 1.0f},
+    {Reading::READING_POWER, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+    {Reading::READING_SPEED, 20, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+};
+// 87/1, type 0x00E8 v1: system_energy (double, Ws), system_power, then a counted list of one entry per pump.
+// Whether system_energy also falls back after a power cut is not known yet; it is held like 93/1 (see publish_).
+static constexpr Field ALPHA3_ENERGY_FIELDS[] = {
+    {Reading::READING_ENERGY, 0, FieldFormat::FIELD_FORMAT_DOUBLE, 1.0f / WATT_SECONDS_PER_KILOWATT_HOUR},
+};
+// 93/1, type 0x00F8 v2: starts (u32), starts_last_hour (u16), starts_last24hrs (u16), operating_time (u32, s, total),
+// operating_time_last_24hrs, last_operating_time, power_up_counter, power_on_time. The pump stores starts and
+// operating_time only now and then: after a power cut a real ALPHA3 reported one start and 3637 s less than before.
+static constexpr Field ALPHA3_HISTORY_FIELDS[] = {
+    {Reading::READING_OPERATING_HOURS, 8, FieldFormat::FIELD_FORMAT_UINT32, 1.0f / SECONDS_PER_HOUR},
+    {Reading::READING_STARTS, 0, FieldFormat::FIELD_FORMAT_UINT32, 1.0f},
+};
+// 88/25, type 0x010A v1: warn_code, alarm_code, highest_prioritized_error_code (u16 each, 0 = no fault)
+static constexpr Field ALPHA3_FAULT_FIELDS[] = {
+    {Reading::READING_WARNING_CODE, 0, FieldFormat::FIELD_FORMAT_UINT16, 1.0f},
+    {Reading::READING_ALARM_CODE, 2, FieldFormat::FIELD_FORMAT_UINT16, 1.0f},
 };
 static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
-    {93, 289, 0x0130, 1, 24, ALPHA3_PROCESS_FIELDS},
-    {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},
+    {93, 289, 0x0130, 1, 24, ALPHA3_PROCESS_FIELDS},  // process values
+    {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},     // motor values
+    {87, 1, 0x00E8, 1, 26, ALPHA3_ENERGY_FIELDS},     // energy; 26 bytes: one pump in the list
+    {93, 1, 0x00F8, 2, 28, ALPHA3_HISTORY_FIELDS},    // operation history
+    {88, 25, 0x010A, 1, 6, ALPHA3_FAULT_FIELDS},      // fault status
 };
 
 static constexpr uint8_t SETTINGS_OBJECT = 86;
@@ -85,6 +107,28 @@ static constexpr bool objects_fit_bits() {
 static_assert(objects_fit_bits(), "A model has more objects than missing_ and warned_ have bits");
 
 static float read_float(const uint8_t *at) { return bit_cast<float>(encode_uint32(at[0], at[1], at[2], at[3])); }
+
+/// The field in body, or NAN when the body is too short for it.
+static float read_field(const Field &field, std::span<const uint8_t> body) {
+  static constexpr uint8_t SIZES[] = {4, 8, 2, 4};
+  if (field.offset + SIZES[static_cast<size_t>(field.format)] > body.size())
+    return NAN;
+  const uint8_t *at = &body[field.offset];
+  switch (field.format) {
+    case FieldFormat::FIELD_FORMAT_DOUBLE: {
+      const uint64_t bits = (static_cast<uint64_t>(encode_uint32(at[0], at[1], at[2], at[3])) << 32) |
+                            encode_uint32(at[4], at[5], at[6], at[7]);
+      return static_cast<float>(bit_cast<double>(bits));
+    }
+    case FieldFormat::FIELD_FORMAT_UINT16:
+      return encode_uint16(at[0], at[1]);
+    case FieldFormat::FIELD_FORMAT_UINT32:
+      return static_cast<float>(encode_uint32(at[0], at[1], at[2], at[3]));
+    case FieldFormat::FIELD_FORMAT_FLOAT:
+      break;
+  }
+  return read_float(at);
+}
 
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
 #if defined(USE_TEXT_SENSOR) || defined(USE_GRUNDFOS_ALPHA_WRITE)
@@ -206,6 +250,11 @@ void GrundfosAlpha::dump_config() {
   LOG_SENSOR("  ", "Current", this->current_sensor_);
   LOG_SENSOR("  ", "Power", this->power_sensor_);
   LOG_SENSOR("  ", "Speed", this->speed_sensor_);
+  LOG_SENSOR("  ", "Energy", this->energy_sensor_);
+  LOG_SENSOR("  ", "Operating hours", this->operating_hours_sensor_);
+  LOG_SENSOR("  ", "Starts", this->starts_sensor_);
+  LOG_SENSOR("  ", "Warning code", this->warning_code_sensor_);
+  LOG_SENSOR("  ", "Alarm code", this->alarm_code_sensor_);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   LOG_TEXT_SENSOR("  ", "Operating mode", this->operating_mode_text_sensor_);
@@ -398,12 +447,8 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
              layout.sub_id, apdu.data_class, apdu.ack, object.type, object.version,
              static_cast<unsigned>(object.body.size()));
   }
-  for (const auto &field : layout.fields) {
-    float value = NAN;
-    if (ok && field.offset + 4u <= object.body.size())
-      value = read_float(&object.body[field.offset]) * field.factor;
-    this->publish_(field.reading, value);
-  }
+  for (const auto &field : layout.fields)
+    this->publish_(field.reading, ok ? read_field(field, object.body) * field.factor : NAN);
   if (ok)
     this->has_values_ = true;
 }
@@ -454,6 +499,14 @@ bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
 
 void GrundfosAlpha::publish_(Reading reading, float value) {
 #ifdef USE_SENSOR
+  // A counter that falls back after a power cut keeps its highest value until it passes it again, so that
+  // total_increasing sensors do not go down. A restart of the ESP forgets the highest values.
+  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_ENERGY);
+  if (total < this->totals_.size() && !std::isnan(value)) {
+    if (value < this->totals_[total])
+      value = this->totals_[total];
+    this->totals_[total] = value;
+  }
   PUBLISH_STATE(this->sensor_(reading), value);
 #endif
 }
@@ -475,6 +528,16 @@ sensor::Sensor *GrundfosAlpha::sensor_(Reading reading) const {
       return this->power_sensor_;
     case Reading::READING_SPEED:
       return this->speed_sensor_;
+    case Reading::READING_ENERGY:
+      return this->energy_sensor_;
+    case Reading::READING_OPERATING_HOURS:
+      return this->operating_hours_sensor_;
+    case Reading::READING_STARTS:
+      return this->starts_sensor_;
+    case Reading::READING_WARNING_CODE:
+      return this->warning_code_sensor_;
+    case Reading::READING_ALARM_CODE:
+      return this->alarm_code_sensor_;
   }
   return nullptr;
 }

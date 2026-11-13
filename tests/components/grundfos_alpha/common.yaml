@@ -29,6 +29,16 @@ sensor:
       name: Pump power
     speed:
       name: Pump speed
+    energy:
+      name: Pump energy
+    operating_hours:
+      name: Pump operating hours
+    starts:
+      name: Pump starts
+    warning_code:
+      name: Pump warning code
+    alarm_code:
+      name: Pump alarm code
 
 text_sensor:
   - platform: grundfos_alpha
