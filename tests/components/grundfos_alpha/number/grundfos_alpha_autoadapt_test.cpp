@@ -11,9 +11,9 @@ class TestNumber : public number::Number {
   void control(float value) override {}
 };
 
-constexpr auto RADIATOR = NumberSetting::NUMBER_SETTING_RADIATOR;
-constexpr auto UNDERFLOOR_SET_POINT = NumberSetting::NUMBER_SETTING_UNDERFLOOR;
-constexpr auto RADIATOR_AND_UNDERFLOOR = NumberSetting::NUMBER_SETTING_RADIATOR_AND_UNDERFLOOR;
+constexpr auto RADIATOR = NumberSetting::NUMBER_SETTING_AUTOADAPT_RADIATOR;
+constexpr auto UNDERFLOOR_SET_POINT = NumberSetting::NUMBER_SETTING_AUTOADAPT_UNDERFLOOR;
+constexpr auto RADIATOR_AND_UNDERFLOOR = NumberSetting::NUMBER_SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR;
 
 // The AutoAdapt objects as a real ALPHA3 sent them. Its limits replies are the same frames as those of constant
 // pressure (86/21: 1.5 to 4.5 m) and proportional pressure (86/19, 86/23: 2 to 4.5 m).
@@ -23,6 +23,10 @@ const Bytes FRAME_GET_86_21 = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x00, 0
 const Bytes FRAME_GET_86_22 = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x00, 0x16, 0xD7, 0x6B};
 const Bytes FRAME_GET_86_23 = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x00, 0x17, 0xC7, 0x4A};
 const Bytes FRAME_GET_86_24 = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x00, 0x18, 0x36, 0xA5};
+// 86/10 in control mode 15 (radiator and underfloor heating), as a real ALPHA3 sent it
+const Bytes REPLY_CONTROL_MODE_RADIATOR_AND_UNDERFLOOR = {0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01,
+                                                          0x2F, 0x01, 0x00, 0x00, 0x07, 0x00, 0x06, 0x0F,
+                                                          0x7F, 0xFF, 0xFF, 0xFF, 0xD7, 0xEF};
 const Bytes &REPLY_RADIATOR_LIMITS = REPLY_PP_LIMITS;
 const Bytes &REPLY_UNDERFLOOR_LIMITS = REPLY_CP_LIMITS;
 const Bytes &REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS = REPLY_PP_LIMITS;
@@ -38,7 +42,7 @@ const Bytes REPLY_UNDERFLOOR_SETPOINT = {0x24, 0x1D, 0xF8, 0xE7, 0x0A, 0x19, 0x0
 const Bytes FRAME_SET_UNDERFLOOR_1_5 = {0x27, 0x1F, 0xE7, 0xF8, 0x0A, 0x9B, 0x56, 0x00, 0x16, 0x01, 0x2E, 0x01,
                                         0x00, 0x00, 0x12, 0x00, 0x04, 0x46, 0x65, 0xC8, 0x00, 0x3F, 0x00, 0x00,
                                         0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xEA, 0x6A};
-// A write of 86/24 from 20588.4 Pa back to 19608 Pa (2 m), as a real ALPHA3 took it in control mode 15
+// A write of 86/24 from 20588.4 Pa back to 19608 Pa (2 m), as a real ALPHA3 took it (in control mode 15)
 const Bytes REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT = {0x24, 0x1D, 0xF8, 0xE7, 0x0A, 0x19, 0x00, 0x01, 0x2E, 0x01, 0x00,
                                                       0x00, 0x12, 0x00, 0x04, 0x46, 0xA0, 0xD8, 0xCD, 0x3F, 0x00, 0x00,
                                                       0x00, 0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x24, 0x4F};
@@ -53,11 +57,12 @@ const Bytes REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2 = {
 
 class AutoAdaptTest : public SelectTest {
  protected:
-  // Identify the pump and read the limits and the set point of radiator and underfloor heating, without the control
-  // mode
-  void read_radiator_and_underfloor_() {
+  // Identify the pump and read the control mode, the limits and the set point of radiator and underfloor heating
+  void read_radiator_and_underfloor_(const Bytes &control_mode = REPLY_CONTROL_MODE_CP) {
     this->pump_.set_number(RADIATOR_AND_UNDERFLOOR, &this->number_);
     this->identify_();
+    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+    this->reply_(control_mode);
     ASSERT_EQ(this->next_request_(), FRAME_GET_86_23);
     this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS);
     ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
@@ -74,17 +79,28 @@ class AutoAdaptTest : public SelectTest {
     ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
   }
 
+  // A write in an AutoAdapt control mode is refused before anything is sent
+  void expect_refused_in_(const Bytes &control_mode) {
+    this->read_radiator_and_underfloor_(control_mode);
+    this->pump_.write_number(RADIATOR_AND_UNDERFLOOR, 2.0f);
+    EXPECT_TRUE(this->next_request_().empty());
+    EXPECT_TRUE(this->pump_.status_has_warning());
+    EXPECT_NEAR(this->number_.state, 20588.4f / 9804.0f, 1e-4f);
+  }
+
   TestNumber number_;
 };
 
-TEST_F(AutoAdaptTest, ReadsLimitsOnceAndTheSetPointWithoutTheControlMode) {
+TEST_F(AutoAdaptTest, ReadsLimitsOnceAndTheSetPointWithTheControlMode) {
   this->read_radiator_and_underfloor_();
   EXPECT_NEAR(this->number_.state, 20588.4f / 9804.0f, 1e-4f);
   this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
   EXPECT_EQ(this->next_request_(), FRAME_GET_86_24);
 }
 
-TEST_F(AutoAdaptTest, WritesTheRadiatorAndUnderfloorSetPoint) {
+TEST_F(AutoAdaptTest, WritesTheRadiatorAndUnderfloorSetPointInConstantPressure) {
   this->read_radiator_and_underfloor_();
   this->write_2_until_set_();
   this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2);
@@ -100,13 +116,32 @@ TEST_F(AutoAdaptTest, ReadBackWithTheOldValueIsWarned) {
   EXPECT_NEAR(this->number_.state, 20588.4f / 9804.0f, 1e-4f);
 }
 
-// Each AutoAdapt mode keeps its own set point, so it is written in another control mode too
-TEST_F(AutoAdaptTest, WritesInAnotherControlMode) {
+// Not written in any AutoAdapt mode, its own (15) or another (14)
+TEST_F(AutoAdaptTest, RefusedInItsOwnAutoAdaptMode) {
+  this->expect_refused_in_(REPLY_CONTROL_MODE_RADIATOR_AND_UNDERFLOOR);
+}
+TEST_F(AutoAdaptTest, RefusedInAnotherAutoAdaptMode) { this->expect_refused_in_(REPLY_CONTROL_MODE_UNDERFLOOR); }
+
+// A write can change the control mode too, so the next write waits until it was read again
+TEST_F(AutoAdaptTest, NextWriteWaitsForAFreshControlMode) {
+  this->read_radiator_and_underfloor_();
+  this->write_2_until_set_();
+  this->pump_.write_number(RADIATOR_AND_UNDERFLOOR, 2.5f);
+  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
+  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_TRUE(this->pump_.status_has_warning());
+}
+
+TEST_F(AutoAdaptTest, WritesInProportionalPressure) {
   this->use_selects_();
   this->pump_.set_number(UNDERFLOOR_SET_POINT, &this->number_);
   this->identify_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
+  this->reply_(REPLY_CONTROL_MODE_PP);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_NORMAL);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_21);
@@ -125,6 +160,8 @@ TEST_F(AutoAdaptTest, WritesInAnotherControlMode) {
 TEST_F(AutoAdaptTest, UsesTheLimitsOfItsMode) {
   this->pump_.set_number(RADIATOR, &this->number_);
   this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_19);
   this->reply_(REPLY_RADIATOR_LIMITS);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_20);
@@ -140,6 +177,8 @@ TEST_F(AutoAdaptTest, UsesTheLimitsOfItsMode) {
 TEST_F(AutoAdaptTest, NoWriteBeforeTheLimits) {
   this->pump_.set_number(RADIATOR_AND_UNDERFLOOR, &this->number_);
   this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_23);
   this->pump_.write_number(RADIATOR_AND_UNDERFLOOR, 2.0f);
   this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS);
@@ -161,14 +200,14 @@ TEST_F(AutoAdaptTest, LateReplyOfAnotherSetPointIsNotWrittenBack) {
     EXPECT_NE(frame[5] & 0xC0, 0x80) << "a SET was sent";
 }
 
-// The constant pressure set point keeps its control mode check while an AutoAdapt set point is written
+// In proportional pressure the constant pressure set point is refused, the AutoAdapt one is written
 TEST_F(AutoAdaptTest, OtherSetPointsKeepTheirControlModeCheck) {
   TestNumber constant_pressure;
   this->pump_.set_number(NumberSetting::NUMBER_SETTING_CONSTANT_PRESSURE, &constant_pressure);
   this->pump_.set_number(RADIATOR_AND_UNDERFLOOR, &this->number_);
   this->identify_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(REPLY_CONTROL_MODE_PP);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
   this->reply_(REPLY_CP_LIMITS);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);

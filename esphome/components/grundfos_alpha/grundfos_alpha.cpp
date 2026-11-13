@@ -123,8 +123,9 @@ static constexpr uint8_t OFFSET_SET_POINT = 2;  // 0x012E local_set_point
 static constexpr uint8_t OFFSET_MIN = 4;        // 0x012D minimum set point
 static constexpr uint8_t OFFSET_MAX = 8;        // 0x012D maximum set point
 
-// A set point that is written in every control mode
-static constexpr uint8_t ANY_CONTROL_MODE = 0xFF;
+// An AutoAdapt set point: written only in constant pressure, proportional pressure or constant speed (0 to 2)
+static constexpr uint8_t OUTSIDE_AUTOADAPT = 0xFF;
+static constexpr uint8_t LAST_FIXED_CONTROL_MODE = 2;
 
 /// The settings objects behind a set point entity, its unit in Pa or rpm, and the control mode it is written in.
 struct NumberLayout {
@@ -137,12 +138,18 @@ static constexpr NumberLayout NUMBERS[] = {
     {Setting::SETTING_CONSTANT_PRESSURE, Setting::SETTING_CONSTANT_PRESSURE_LIMITS, PASCAL_PER_METER, 0},
     {Setting::SETTING_PROPORTIONAL_PRESSURE, Setting::SETTING_PROPORTIONAL_PRESSURE_LIMITS, PASCAL_PER_METER, 1},
     {Setting::SETTING_CONSTANT_SPEED, Setting::SETTING_CONSTANT_SPEED_LIMITS, 1.0f, 2},
-    // The AutoAdapt set points (86/20, 86/22, 86/24): each control mode keeps its own value, and a write in another
-    // control mode leaves the pump's operation unchanged. 86/6 shows the value of the AutoAdapt mode in effect.
-    {Setting::SETTING_RADIATOR, Setting::SETTING_RADIATOR_LIMITS, PASCAL_PER_METER, ANY_CONTROL_MODE},
-    {Setting::SETTING_UNDERFLOOR, Setting::SETTING_UNDERFLOOR_LIMITS, PASCAL_PER_METER, ANY_CONTROL_MODE},
-    {Setting::SETTING_RADIATOR_AND_UNDERFLOOR, Setting::SETTING_RADIATOR_AND_UNDERFLOOR_LIMITS, PASCAL_PER_METER,
-     ANY_CONTROL_MODE},
+    // The AutoAdapt set points 86/20, 86/22, 86/24. One ALPHA3 mirrored the value of the AutoAdapt mode in effect to
+    // 86/6, so a write there acts at once; what it does to the learned state (90/103) was not tested, and the Grundfos
+    // app offers no AutoAdapt set point. So they are written only outside the AutoAdapt modes. That this leaves the
+    // operation unchanged is assumed from 86/18, which a write in AutoAdapt left without effect.
+    // On that pump the three objects differ only in the set point: a late reply of one passes the read check of
+    // another. The SET then has the intended bytes; the entity can show the other value until the next poll.
+    {Setting::SETTING_AUTOADAPT_RADIATOR, Setting::SETTING_AUTOADAPT_RADIATOR_LIMITS, PASCAL_PER_METER,
+     OUTSIDE_AUTOADAPT},
+    {Setting::SETTING_AUTOADAPT_UNDERFLOOR, Setting::SETTING_AUTOADAPT_UNDERFLOOR_LIMITS, PASCAL_PER_METER,
+     OUTSIDE_AUTOADAPT},
+    {Setting::SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR, Setting::SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR_LIMITS,
+     PASCAL_PER_METER, OUTSIDE_AUTOADAPT},
 };
 static_assert(std::size(NUMBERS) == static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT));
 #endif
@@ -194,9 +201,9 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "Constant pressure set point", this->numbers_[0]);
   LOG_NUMBER("  ", "Proportional pressure set point", this->numbers_[1]);
   LOG_NUMBER("  ", "Constant speed set point", this->numbers_[2]);
-  LOG_NUMBER("  ", "Radiator set point", this->numbers_[3]);
-  LOG_NUMBER("  ", "Underfloor heating set point", this->numbers_[4]);
-  LOG_NUMBER("  ", "Radiator and underfloor heating set point", this->numbers_[5]);
+  LOG_NUMBER("  ", "AutoAdapt radiator set point", this->numbers_[3]);
+  LOG_NUMBER("  ", "AutoAdapt underfloor heating set point", this->numbers_[4]);
+  LOG_NUMBER("  ", "AutoAdapt radiator and underfloor heating set point", this->numbers_[5]);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
   LOG_BUTTON("  ", "Start", this->start_button_);
@@ -451,9 +458,8 @@ bool GrundfosAlpha::wants_setting_(Setting setting) const {
   for (size_t i = 0; i < std::size(NUMBERS); i++) {
     if (this->numbers_[i] == nullptr)
       continue;
-    // A set point with a control mode is written only in it, so that is read too; the limits do not change
-    if ((setting == Setting::SETTING_CONTROL_MODE && NUMBERS[i].control_mode != ANY_CONTROL_MODE) ||
-        NUMBERS[i].value == setting ||
+    // A set point depends on the control mode, so that is read too; the limits do not change
+    if (setting == Setting::SETTING_CONTROL_MODE || NUMBERS[i].value == setting ||
         (NUMBERS[i].limits == setting && (this->last_known_ & (1u << static_cast<size_t>(setting))) == 0))
       return true;
   }
@@ -656,9 +662,13 @@ const LogString *GrundfosAlpha::job_refusal_() const {
   }
 #ifdef USE_NUMBER
   // job_ready_() made sure the control mode was polled
+  const uint8_t mode = this->last_body_[control_mode][OFFSET_CONTROL_MODE];
   for (const auto &layout : NUMBERS) {
-    if (layout.value == this->job_.setting && layout.control_mode != ANY_CONTROL_MODE &&
-        this->last_body_[control_mode][OFFSET_CONTROL_MODE] != layout.control_mode)
+    if (layout.value != this->job_.setting)
+      continue;
+    if (layout.control_mode == OUTSIDE_AUTOADAPT && mode > LAST_FIXED_CONTROL_MODE)
+      return LOG_STR("AutoAdapt set points are written only outside AutoAdapt");
+    if (layout.control_mode != OUTSIDE_AUTOADAPT && mode != layout.control_mode)
       return LOG_STR("not in the control mode of this set point");
   }
 #endif
@@ -673,9 +683,9 @@ bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
   if (request.setting == Setting::SETTING_OPERATING_MODE && this->wants_setting_(Setting::SETTING_CONTROL_MODE))
     needed |= 1u << static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
 #ifdef USE_NUMBER
-  // A set point with a control mode also needs the control mode
+  // A set point also needs the control mode
   for (const auto &layout : NUMBERS) {
-    if (layout.value == request.setting && layout.control_mode != ANY_CONTROL_MODE)
+    if (layout.value == request.setting)
       needed |= 1u << static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
   }
 #endif
