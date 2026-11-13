@@ -121,6 +121,24 @@ static constexpr bool objects_fit_bits() {
 }
 static_assert(objects_fit_bits(), "A model has more objects than missing_ and warned_ have bits");
 
+// current_ holds a step of the poll chain or one of these; no value may stand for two things
+static constexpr uint8_t REQUESTS[] = {REQUEST_CLOCK, REQUEST_WRITE, REQUEST_IDENTITY, REQUEST_NONE};
+static constexpr bool requests_are_distinct() {
+  constexpr size_t steps = static_cast<size_t>(Setting::SETTING_COUNT) + static_cast<size_t>(InfoStep::INFO_STEP_COUNT);
+  for (size_t i = 0; i < std::size(REQUESTS); i++) {
+    for (size_t j = i + 1; j < std::size(REQUESTS); j++) {
+      if (REQUESTS[i] == REQUESTS[j])
+        return false;
+    }
+    for (const auto &model : MODELS) {
+      if (REQUESTS[i] < model.objects.size() + steps)
+        return false;
+    }
+  }
+  return true;
+}
+static_assert(requests_are_distinct(), "Two REQUEST_ values are equal or one is a step of the poll chain");
+
 static float read_float(const uint8_t *at) { return bit_cast<float>(encode_uint32(at[0], at[1], at[2], at[3])); }
 
 /// The field in body, or NAN when the body is too short for it.
@@ -365,7 +383,9 @@ void GrundfosAlpha::dump_config() {
   LOG_SWITCH("  ", "Automatic night setback", this->automatic_night_setback_switch_);
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
-  ESP_LOGCONFIG(TAG, "  Sets the pump's clock from the time source");
+  ESP_LOGCONFIG(TAG, "  Pump clock: %s",
+                this->clock_writes_ ? LOG_STR_LITERAL("checked and set from the time source")
+                                    : LOG_STR_LITERAL("checked against the time source"));
 #ifdef USE_SENSOR
   LOG_SENSOR("  ", "Clock deviation", this->clock_deviation_sensor_);
 #endif
@@ -427,13 +447,8 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   }
 #endif
   if (current == REQUEST_IDENTITY) {
-    if (!this->identify_(response))
-      return;
-#ifdef USE_GRUNDFOS_ALPHA_CLOCK
-    if (this->start_clock_())
-      return;
-#endif
-    this->request_from_(0);
+    if (this->identify_(response))
+      this->request_from_(0);
     return;
   }
   if (this->model_ == nullptr)
@@ -463,6 +478,9 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
 
 void GrundfosAlpha::on_connected() {
   this->missing_ = 0;
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  this->clock_polled_ = false;
+#endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   this->texts_read_ = 0;
   this->texts_retried_ = 0;
@@ -478,6 +496,9 @@ void GrundfosAlpha::on_disconnected() {
   // The pump may have lost its clock with its power; check again after the next connection
   this->clock_phase_ = ClockPhase::CLOCK_PHASE_NONE;
   this->clock_due_ = true;
+#ifdef USE_SENSOR
+  PUBLISH_STATE(this->clock_deviation_sensor_, NAN);
+#endif
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   // Empty, as ble_client text sensors show a lost connection. The product texts stay: they are read again after the
@@ -597,6 +618,10 @@ void GrundfosAlpha::request_from_(size_t step) {
     return;
   }
 #endif
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  // The poll chain is done: the clock check may follow from the next update on
+  this->clock_polled_ = true;
 #endif
 }
 
@@ -1310,7 +1335,8 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
 
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
 bool GrundfosAlpha::start_clock_() {
-  if (this->time_ == nullptr || this->model_ == nullptr || !this->model_->has_clock ||
+  // Not before the first poll after a connection, which the entities need first
+  if (this->time_ == nullptr || this->model_ == nullptr || !this->model_->has_clock || !this->clock_polled_ ||
       this->clock_phase_ != ClockPhase::CLOCK_PHASE_NONE)
     return false;
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
@@ -1364,6 +1390,11 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
       PUBLISH_STATE(this->clock_deviation_sensor_, static_cast<float>(deviation));
 #endif
       if (std::abs(deviation) < CLOCK_TOLERANCE_S) {
+        done = true;
+        break;
+      }
+      if (!this->clock_writes_) {
+        ESP_LOGD(TAG, "Pump clock is %" PRId32 " s off", deviation);
         done = true;
         break;
       }

@@ -5,7 +5,9 @@ import pytest
 from esphome import config_validation as cv, final_validate as fv
 from esphome.components.grundfos_alpha import (
     CONF_GRUNDFOS_ALPHA_ID,
+    CONF_SET_CLOCK,
     CONFIG_SCHEMA,
+    _validate_set_clock,
     validate_update_interval,
 )
 from esphome.components.grundfos_alpha.sensor import (
@@ -43,10 +45,31 @@ def test_update_interval_below_5_s_is_rejected(value: str) -> None:
 
 
 def test_schema_uses_the_checked_update_interval() -> None:
-    keys = [k for k in CONFIG_SCHEMA.schema if k == CONF_UPDATE_INTERVAL]
+    schema = CONFIG_SCHEMA.validators[0].schema
+    keys = [k for k in schema if k == CONF_UPDATE_INTERVAL]
     assert len(keys) == 1
     assert keys[0].default() == "30s"
-    assert CONFIG_SCHEMA.schema[keys[0]] is validate_update_interval
+    assert schema[keys[0]] is validate_update_interval
+
+
+def test_set_clock_is_off_by_default() -> None:
+    schema = CONFIG_SCHEMA.validators[0].schema
+    keys = [k for k in schema if k == CONF_SET_CLOCK]
+    assert len(keys) == 1
+    assert keys[0].default() is False
+
+
+def test_set_clock_needs_the_time_id() -> None:
+    with pytest.raises(cv.Invalid, match="time_id"):
+        _validate_set_clock({CONF_SET_CLOCK: True})
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{CONF_SET_CLOCK: False}, {CONF_SET_CLOCK: True, CONF_TIME_ID: ID("clock")}],
+)
+def test_set_clock_with_the_time_id_or_off_is_accepted(config: dict) -> None:
+    assert _validate_set_clock(config) is config
 
 
 @pytest.mark.parametrize(

@@ -270,6 +270,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
   void set_time_id(time::RealTimeClock *time) { this->time_ = time; }
+  /// Set the pump's clock when it is off; without this the clock is only checked.
+  void set_clock_writes(bool writes) { this->clock_writes_ = writes; }
 #endif
 
  protected:
@@ -392,7 +394,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   uint32_t clock_checked_at_{0};
   std::array<uint8_t, 10> clock_body_{};  // 94/100 as written
   ClockPhase clock_phase_{ClockPhase::CLOCK_PHASE_NONE};
-  bool clock_due_{true};  // check at the first update with a valid time after a connection
+  bool clock_due_{true};      // check at the first update with a valid time after a connection
+  bool clock_polled_{false};  // a poll chain ended since the connection came up
+  bool clock_writes_{false};
   bool clock_write_blocked_{false};
 #endif
 };

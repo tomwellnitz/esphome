@@ -65,11 +65,19 @@ class ClockTest : public PumpTest {
     PumpTest::SetUp();
     this->pump_.set_time_id(&this->clock_);
     this->pump_.set_clock_deviation_sensor(&this->deviation_);
+    this->pump_.set_clock_writes(true);
+  }
+
+  // Identify the pump; without other entities its first poll ends at once, and the next update checks the clock
+  void connect_() {
+    this->identify_();
+    ASSERT_TRUE(this->next_request_().empty());
+    this->pump_.update();
   }
 
   // Identify the pump and answer the check with the recorded slow clock, up to the SET
   void check_until_set_(const Bytes &config = REPLY_CONFIG_OLD) {
-    this->identify_();
+    this->connect_();
     ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
     this->reply_(REPLY_ACTUAL_SLOW);
     ASSERT_EQ(this->next_request_(), FRAME_GET_94_100);
@@ -98,7 +106,7 @@ class ClockTest : public PumpTest {
   // Answer the steps of a check that sets the clock, up to the request of the given step: 0 the check, 1 the read of
   // 94/100, 2 the SET, 3 the read-back, 4 the check after the write
   void run_to_step_(int step) {
-    this->identify_();
+    this->connect_();
     ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
     const Bytes replies[] = {REPLY_ACTUAL_SLOW, REPLY_CONFIG_OLD, REPLY_SET_ACK, REPLY_CONFIG_SET};
     const Bytes requests[] = {FRAME_GET_94_100, FRAME_SET_CLOCK, FRAME_GET_94_100, FRAME_GET_94_101};
@@ -128,6 +136,9 @@ class ClockTest : public PumpTest {
     EXPECT_FALSE(this->checks_after_(HOUR_MS));
     this->bus_.lose_connection();
     this->bus_.establish_connection();
+    // The first poll ends at once without other entities; the next update checks the clock
+    ASSERT_TRUE(this->next_request_().empty());
+    this->pump_.update();
     ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
     this->reply_(REPLY_ACTUAL_SLOW);
     EXPECT_FLOAT_EQ(this->deviation_.state, -46.0f);
@@ -179,7 +190,7 @@ TEST_F(ClockTest, SetsASlowClockAfterTheConnection) {
 
 TEST_F(ClockTest, RightClockIsNotWritten) {
   this->clock_.now = TIME_20_49_31;
-  this->identify_();
+  this->connect_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
   this->reply_(REPLY_ACTUAL_20_49_31);
   EXPECT_FLOAT_EQ(this->deviation_.state, 0.0f);
@@ -221,6 +232,9 @@ TEST_F(ClockTest, ChecksAgainAfterAReconnection) {
   this->set_clock_();
   this->bus_.lose_connection();
   this->bus_.establish_connection();
+  // The first poll ends at once without other entities; the next update checks the clock
+  ASSERT_TRUE(this->next_request_().empty());
+  this->pump_.update();
   EXPECT_EQ(this->next_request_(), FRAME_GET_94_101);
 }
 
@@ -229,6 +243,9 @@ TEST_F(ClockTest, ConnectionLostDuringTheCheck) {
   ASSERT_EQ(this->next_request_(), FRAME_SET_CLOCK);
   this->bus_.lose_connection();
   this->bus_.establish_connection();
+  // The first poll ends at once without other entities; the next update checks the clock
+  ASSERT_TRUE(this->next_request_().empty());
+  this->pump_.update();
   EXPECT_EQ(this->next_request_(), FRAME_GET_94_101);
 }
 
@@ -303,7 +320,7 @@ TEST_F(ClockTest, TimeoutOfTheCheckAfterTheWrite) { this->expect_timeout_(4); }
 // A command pressed during the check waits for it and then goes first
 TEST_F(ClockTest, CommandWaitsForTheCheck) {
   this->clock_.now = TIME_20_49_31;
-  this->identify_();
+  this->connect_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
   this->pump_.send_command(Command::COMMAND_RESET_ALARM);
   EXPECT_TRUE(this->next_request_().empty());
@@ -314,7 +331,7 @@ TEST_F(ClockTest, CommandWaitsForTheCheck) {
 
 // Another object in the reply to the check is never taken for the time
 TEST_F(ClockTest, WrongObjectInTheCheckIsNotWritten) {
-  this->identify_();
+  this->connect_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
   this->reply_(REPLY_CONFIG_OLD);
   EXPECT_TRUE(this->next_request_().empty());
@@ -322,7 +339,7 @@ TEST_F(ClockTest, WrongObjectInTheCheckIsNotWritten) {
 }
 
 TEST_F(ClockTest, MissingObjectIsNotWritten) {
-  this->identify_();
+  this->connect_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
   this->reply_(REPLY_OBJECT_MISSING);
   EXPECT_TRUE(this->next_request_().empty());
@@ -335,22 +352,43 @@ TEST_F(ClockTest, WrongObjectBeforeTheWriteIsNotWritten) {
 
 // After a timeout a late answer may still come: nothing more is sent until the next update
 TEST_F(ClockTest, TimeoutWaitsForTheNextUpdate) {
-  this->identify_();
+  this->connect_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
   this->run_(TIMEOUT_MS + QUIET_MS + 100);
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->checks_after_(0));
 }
 
-// The poll goes on after the check
-TEST_F(ClockTest, MeasurementsFollowTheCheck) {
+// The clock is checked only after the first poll of a connection, and the poll goes on after the check
+TEST_F(ClockTest, CheckFollowsTheFirstPollAndThePollGoesOn) {
   sensor::Sensor flow;
   this->pump_.set_flow_sensor(&flow);
   this->clock_.now = TIME_20_49_31;
   this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  ASSERT_TRUE(this->next_request_().empty());
+  this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
   this->reply_(REPLY_ACTUAL_20_49_31);
   EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
+}
+
+// Without set_clock the clock is only compared, never written
+TEST_F(ClockTest, OnlyChecksWithoutSetClock) {
+  this->pump_.set_clock_writes(false);
+  this->connect_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
+  this->reply_(REPLY_ACTUAL_SLOW);
+  EXPECT_FLOAT_EQ(this->deviation_.state, -46.0f);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->pump_.status_has_warning());
+}
+
+TEST_F(ClockTest, DeviationIsUnknownWhileDisconnected) {
+  this->set_clock_();
+  this->bus_.lose_connection();
+  EXPECT_TRUE(std::isnan(this->deviation_.state));
 }
 
 // Without a time source the pump's clock is left alone
