@@ -113,6 +113,7 @@ static constexpr uint8_t SET_STATUS_FAILED = 4;
 
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
 static constexpr uint8_t OFFSET_SET_POINT = 2;  // 0x012E local_set_point
+static constexpr uint8_t OFFSET_DEFAULT = 0;    // 0x012D default set point
 static constexpr uint8_t OFFSET_MIN = 4;        // 0x012D minimum set point
 static constexpr uint8_t OFFSET_MAX = 8;        // 0x012D maximum set point
 
@@ -131,7 +132,7 @@ static constexpr NumberLayout NUMBERS[] = {
 #endif
 
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
-/// The bits of last_known_ for the set point limits, which do not change.
+/// The bits of last_known_ for the set point limits, which do not change while the pump is connected.
 static constexpr uint16_t limit_bits() {
   uint16_t bits = 0;
 #ifdef USE_NUMBER
@@ -209,6 +210,7 @@ void GrundfosAlpha::update() {
       this->status_clear_warning();
     }
   }
+  this->drop_stuck_write_();
   if (this->start_job_())
     return;
 #endif
@@ -271,8 +273,8 @@ void GrundfosAlpha::on_disconnected() {
     this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
     this->status_set_warning(LOG_STR("Write failed"));
   }
-  // The pump may change while away; a write waits for the next poll
-  this->last_known_ &= LIMIT_BITS;
+  // The pump may change while away, or be another pump; a write waits for the next poll, and the limits are read again
+  this->last_known_ = 0;
 #ifdef USE_NUMBER
   for (auto *entity : this->numbers_) {
     if (entity != nullptr && entity->has_state())
@@ -507,8 +509,19 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
     if (NUMBERS[i].value == setting) {
       PUBLISH_STATE(this->numbers_[i], read_float(&body[OFFSET_SET_POINT]) / NUMBERS[i].raw_per_unit);
     } else if (NUMBERS[i].limits == setting) {
+      const float fallback = read_float(&body[OFFSET_DEFAULT]);
       this->min_[i] = read_float(&body[OFFSET_MIN]);
       this->max_[i] = read_float(&body[OFFSET_MAX]);
+      // All limits objects have the same type, so only their values can show a broken or misplaced reply
+      if (!(this->min_[i] < this->max_[i] && fallback >= this->min_[i] && fallback <= this->max_[i])) {
+        if (this->first_warning_(WARNED_SETTING)) {
+          ESP_LOGW(TAG, "Implausible limits in 86/%u: default %.0f, %.0f to %.0f",
+                   (*this->model_->settings)[index].sub_id, fallback, this->min_[i], this->max_[i]);
+        }
+        this->min_[i] = NAN;
+        this->max_[i] = NAN;
+        this->last_known_ &= ~(1u << index);
+      }
     }
   }
 #endif
@@ -587,11 +600,29 @@ void GrundfosAlpha::send_command(Command command) {
   }
 }
 
+void GrundfosAlpha::drop_stuck_write_() {
+  if (this->queued_ == 0 || this->phase_ != JobPhase::JOB_PHASE_NONE || this->job_ready_(this->queue_[0])) {
+    this->waited_ = 0;
+    return;
+  }
+  // An object that never has a valid read, for example after a firmware update, would block the writes behind it
+  if (++this->waited_ < WRITE_WAIT_CYCLES)
+    return;
+  this->waited_ = 0;
+  ESP_LOGW(TAG, "Write to %u/%u dropped: no valid read of the object", SETTINGS_OBJECT,
+           (*this->model_->settings)[static_cast<size_t>(this->queue_[0].setting)].sub_id);
+  std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
+  this->queued_--;
+  this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
+  this->status_set_warning(LOG_STR("Write failed"));
+}
+
 bool GrundfosAlpha::start_job_() {
   if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->model_ == nullptr || this->model_->settings == nullptr)
     return false;
   while (this->queued_ != 0) {
-    // A write waits until its object was polled; the read before the write is checked against that poll
+    // A write waits until its object was polled; the read before the write is checked against that poll. A command
+    // never goes past a waiting write: a stop after a write of Max must not end up running the pump at Max.
     if (!this->job_ready_(this->queue_[0]))
       return false;
     this->job_ = this->queue_[0];
