@@ -109,6 +109,8 @@ static constexpr uint8_t OFFSET_CONTROL_MODE = 2;  // 0x012F and 0x0154: the req
 // CONTROL_MODE_OPTIONS and OPERATING_MODE_OPTIONS in select.py list the same values in the same order.
 static constexpr uint8_t CONTROL_MODES[] = {0, 1, 2, 13, 14, 15};
 static constexpr uint8_t OPERATING_MODES[] = {0, 1, 2, 3};
+static constexpr uint8_t OPERATING_MODE_NORMAL = 0;
+static constexpr uint8_t OPERATING_MODE_STOP = 1;
 static_assert(sizeof(CONTROL_MODES) == 6 && sizeof(OPERATING_MODES) == 4, "Change the options in select.py too");
 // Status byte of a class 10 SET acknowledgement
 static constexpr uint8_t SET_STATUS_BUSY = 2;
@@ -183,6 +185,11 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "Constant pressure set point", this->numbers_[0]);
   LOG_NUMBER("  ", "Proportional pressure set point", this->numbers_[1]);
   LOG_NUMBER("  ", "Constant speed set point", this->numbers_[2]);
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
+  LOG_BUTTON("  ", "Start", this->start_button_);
+  LOG_BUTTON("  ", "Stop", this->stop_button_);
+  LOG_BUTTON("  ", "Reset alarm", this->reset_alarm_button_);
 #endif
 }
 
@@ -577,7 +584,7 @@ void GrundfosAlpha::write_number(NumberSetting setting, float value) {
              this->max_[i] / NUMBERS[i].raw_per_unit);
     return;
   }
-  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 0, true, raw}, LOG_STR("Set point"));
+  this->enqueue_({NUMBERS[i].value, OFFSET_SET_POINT, 0, true, raw, Command::COMMAND_NONE}, LOG_STR("Set point"));
 }
 #endif
 
@@ -587,11 +594,17 @@ void GrundfosAlpha::write_select(SelectSetting setting, size_t index) {
   const std::span<const uint8_t> values = control ? std::span<const uint8_t>(CONTROL_MODES) : OPERATING_MODES;
   if (index >= values.size())
     return;
-  this->enqueue_({control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
-                  control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index], false, 0.0f},
-                 control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
+  this->enqueue_(
+      {control ? Setting::SETTING_CONTROL_MODE : Setting::SETTING_OPERATING_MODE,
+       control ? OFFSET_CONTROL_MODE : OFFSET_OPERATION_MODE, values[index], false, 0.0f, Command::COMMAND_NONE},
+      control ? LOG_STR("Control mode") : LOG_STR("Operating mode"));
 }
 #endif
+
+/// Whether a request starts or stops the pump or changes its operating mode.
+static bool changes_run_state(const WriteRequest &request) {
+  return request.setting == Setting::SETTING_COUNT || request.setting == Setting::SETTING_OPERATING_MODE;
+}
 
 bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what) {
   if (!this->parent_->is_connected() || this->model_ == nullptr || this->model_->settings == nullptr) {
@@ -599,9 +612,22 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
     return false;
   }
   size_t slot = 0;
-  while (slot < this->queued_ && this->queue_[slot].setting != request.setting)
+  while (slot < this->queued_ &&
+         (this->queue_[slot].setting != request.setting || this->queue_[slot].command != request.command))
     slot++;
-  if (slot < this->queued_) {
+  bool move = false;
+  if (slot < this->queued_ && changes_run_state(request)) {
+    for (size_t later = slot + 1; later < this->queued_; later++)
+      move = move || changes_run_state(this->queue_[later]);
+  }
+  if (move) {
+    // A start, stop or operating mode queued after it must not override the newer request: it moves to the end.
+    // Other writes keep their place, as a set point waits behind the control mode it needs.
+    std::copy(this->queue_.begin() + slot + 1, this->queue_.begin() + this->queued_, this->queue_.begin() + slot);
+    if (slot == 0)
+      this->waited_ = 0;
+    slot = this->queued_ - 1;
+  } else if (slot < this->queued_) {
     ESP_LOGV(TAG, "Replacing a waiting write");
   } else if (this->queued_ == WRITE_QUEUE_SIZE) {
     ESP_LOGW(TAG, "%s not written: too many waiting writes", LOG_STR_ARG(what));
@@ -614,6 +640,19 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
   if (!this->reply_failed_ && !this->parent_->is_busy(this))
     this->start_job_();
   return true;
+}
+
+void GrundfosAlpha::send_command(Command command) {
+  // Only the commands the app sends; the bus would send any ID
+  switch (command) {
+    case Command::COMMAND_RESET_ALARM:
+    case Command::COMMAND_STOP:
+    case Command::COMMAND_START:
+      this->enqueue_({Setting::SETTING_COUNT, 0, 0, false, 0.0f, command}, LOG_STR("Command"));
+      break;
+    default:
+      break;
+  }
 }
 
 void GrundfosAlpha::drop_stuck_write_() {
@@ -643,12 +682,22 @@ bool GrundfosAlpha::start_job_() {
   if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->model_ == nullptr || this->model_->settings == nullptr)
     return false;
   while (this->queued_ != 0) {
-    // A write waits until its object was polled; the read before the write is checked against that poll
+    // A write waits until its object was polled; the read before the write is checked against that poll. A command
+    // never goes past a waiting write: a stop after a write of Max must not end up running the pump at Max.
     if (!this->job_ready_(this->queue_[0]))
       return false;
     this->job_ = this->queue_[0];
     std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
     this->queued_--;
+    if (this->job_.setting == Setting::SETTING_COUNT) {
+      this->phase_ = JobPhase::JOB_PHASE_COMMAND;
+      if (!this->send_command_(static_cast<uint8_t>(this->job_.command))) {
+        this->end_job_(LOG_STR("not sent"));
+        return false;
+      }
+      this->current_ = REQUEST_WRITE;
+      return true;
+    }
     this->phase_ = JobPhase::JOB_PHASE_READ;
     // Checked now, not when queued: a control mode written just before counts
     if (const LogString *refusal = this->job_refusal_(); refusal != nullptr) {
@@ -679,6 +728,8 @@ const LogString *GrundfosAlpha::job_refusal_() const {
 }
 
 bool GrundfosAlpha::job_ready_(const WriteRequest &request) const {
+  if (request.setting == Setting::SETTING_COUNT)
+    return true;  // a command reads nothing first
   constexpr size_t control_mode = static_cast<size_t>(Setting::SETTING_CONTROL_MODE);
   constexpr size_t operating_mode = static_cast<size_t>(Setting::SETTING_OPERATING_MODE);
   uint16_t needed = 1u << static_cast<size_t>(request.setting);
@@ -815,6 +866,46 @@ void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
       this->end_job_(this->confirms_job_(object.body) ? nullptr : LOG_STR("the pump kept another value"));
       break;
     }
+    case JobPhase::JOB_PHASE_COMMAND: {
+      // A command reply has no data
+      genibus::ApduReader reader(response.apdus);
+      genibus::Apdu apdu{};
+      if (response.error != GenibusError::GENIBUS_ERROR_NONE) {
+        this->end_job_(LOG_STR("no reply"));
+      } else if (!reader.next(apdu) || apdu.data_class != genibus::CLASS_COMMAND || apdu.ack != 0 ||
+                 !apdu.data.empty()) {
+        ESP_LOGV(TAG, "Command reply: class %u, ACK %u, %u bytes", apdu.data_class, apdu.ack,
+                 static_cast<unsigned>(apdu.data.size()));
+        this->end_job_(LOG_STR("refused"));
+      } else if (this->job_.command == Command::COMMAND_RESET_ALARM) {
+        this->end_job_(nullptr);
+      } else {
+        // The acknowledgement alone proves nothing: a start or stop shows in the operating mode of 86/100
+        this->phase_ = JobPhase::JOB_PHASE_COMMAND_VERIFY;
+        if (!this->request_object_(
+                SETTINGS_OBJECT,
+                (*this->model_->settings)[static_cast<size_t>(Setting::SETTING_OPERATING_MODE)].sub_id)) {
+          this->end_job_(LOG_STR("read-back not sent"));
+          break;
+        }
+        this->current_ = REQUEST_WRITE;
+        return;
+      }
+      break;
+    }
+    case JobPhase::JOB_PHASE_COMMAND_VERIFY: {
+      if (!this->parse_setting_(Setting::SETTING_OPERATING_MODE, response, object)) {
+        this->end_job_(LOG_STR("no valid read-back"));
+        break;
+      }
+      this->publish_setting_(Setting::SETTING_OPERATING_MODE, object.body);
+      // Measured on an ALPHA3 seconds later: STOP sets 86/100 byte 1 to Stop (1), AUTO back to Normal (0). That it is
+      // already set right after the acknowledgement is not measured yet.
+      const uint8_t expected =
+          this->job_.command == Command::COMMAND_STOP ? OPERATING_MODE_STOP : OPERATING_MODE_NORMAL;
+      this->end_job_(object.body[OFFSET_OPERATION_MODE] == expected ? nullptr : LOG_STR("the pump kept another value"));
+      break;
+    }
     default:
       return;
   }
@@ -828,12 +919,13 @@ void GrundfosAlpha::continue_job_(const genibus::GenibusResponse &response) {
 }
 
 void GrundfosAlpha::end_job_(const LogString *failure) {
-  if (this->phase_ == JobPhase::JOB_PHASE_WRITE || this->phase_ == JobPhase::JOB_PHASE_VERIFY) {
-    // A write can change other objects too (a control mode write changes 86/100 byte 2): the next write of one of
-    // them waits until it was polled again, so its read is not checked against an old poll. A failed job clears its
-    // own bit too, even after a fresh read-back; a new write then waits for the next poll.
+  if (this->phase_ == JobPhase::JOB_PHASE_WRITE || this->phase_ == JobPhase::JOB_PHASE_VERIFY ||
+      this->phase_ == JobPhase::JOB_PHASE_COMMAND || this->phase_ == JobPhase::JOB_PHASE_COMMAND_VERIFY) {
+    // A write or command can change other objects too (a control mode write changes 86/100 byte 2): the next write
+    // of one of them waits until it was polled again, so its read is not checked against an old poll. A failed job
+    // clears its own bit too, even after a fresh read-back; a new write then waits for the next poll.
     uint16_t keep = LIMIT_BITS;
-    if (failure == nullptr)
+    if (failure == nullptr && this->job_.setting != Setting::SETTING_COUNT)
       keep |= 1u << static_cast<size_t>(this->job_.setting);
     this->last_known_ &= keep;
   }
@@ -846,7 +938,11 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
     }
     return;
   }
-  ESP_LOGW(TAG, "Write to 86/%u failed: %s", this->job_sub_id_(), LOG_STR_ARG(failure));
+  if (this->job_.setting == Setting::SETTING_COUNT) {
+    ESP_LOGW(TAG, "Command %u failed: %s", static_cast<uint8_t>(this->job_.command), LOG_STR_ARG(failure));
+  } else {
+    ESP_LOGW(TAG, "Write to 86/%u failed: %s", this->job_sub_id_(), LOG_STR_ARG(failure));
+  }
   this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
   this->status_set_warning(LOG_STR("Write failed"));
 }

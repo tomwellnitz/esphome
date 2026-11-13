@@ -146,6 +146,46 @@ TEST_F(NumberTest, ControlModeWrittenJustBeforeCounts) {
   EXPECT_FALSE(this->pump_.status_has_warning());
 }
 
+// A control mode asked for again keeps its place: moved behind the set point, it would leave the set point in the
+// wrong control mode
+TEST_F(NumberTest, RepeatedControlModeKeepsItsPlaceBeforeTheSetPoint) {
+  this->use_selects_();
+  this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
+  this->reply_(REPLY_CP_LIMITS);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // a poll is on the wire, so both writes wait
+  this->pump_.write_select(CONTROL_MODE, 0);
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);
+  this->pump_.write_select(CONTROL_MODE, 0);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  ASSERT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CP);
+  this->reply_(REPLY_SET_ACK);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
+  // Now in constant pressure: the set point follows once the poll has read its object again
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+}
+
 // The pump would limit 4.51 m to 4.5 m without saying so and still acknowledge the write
 TEST_F(NumberTest, LimitsAreExact) {
   this->read_constant_pressure_();
