@@ -3,8 +3,8 @@ ble_client:
     id: grundfos_alpha_blec
 
 genibus_ble:
-  id: grundfos_alpha_bus
-  ble_client_id: grundfos_alpha_blec
+  - id: grundfos_alpha_bus
+    ble_client_id: grundfos_alpha_blec
 
 grundfos_alpha:
   id: grundfos_alpha_pump

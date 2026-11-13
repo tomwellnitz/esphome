@@ -4,6 +4,6 @@ ble_client:
 
 # No device yet: this also checks that GENIBUS_DEVICE_COUNT is emitted as 0
 genibus_ble:
-  id: genibus_ble_bus
-  ble_client_id: genibus_ble_blec
-  master_address: 0xF8
+  - id: genibus_ble_bus
+    ble_client_id: genibus_ble_blec
+    master_address: 0xF8

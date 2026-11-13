@@ -3,8 +3,8 @@ ble_client:
     id: genibus_blec
 
 genibus_ble:
-  id: genibus_bus
-  ble_client_id: genibus_blec
+  - id: genibus_bus
+    ble_client_id: genibus_blec
 
 sensor:
   # Object 87/1 of an ALPHA3: the energy counter, a double in Ws at offset 0
@@ -18,13 +18,17 @@ sensor:
     type: double
     expected_type: 0x00E8
     expected_version: 1
-    multiply: 0.000000277778
     unit_of_measurement: kWh
+    filters:
+      - multiply: 0.000000277778
     update_interval: 5min
   - platform: genibus
+    genibus_id: genibus_bus
     name: Pump power
     address: 0xE7
     object: 87
     sub_id: 1
     offset: 8
     type: float
+    expected_type: 0x00E8
+    expected_version: 1
