@@ -14,9 +14,9 @@ CONF_GRUNDFOS_ALPHA_ID = "grundfos_alpha_id"
 grundfos_alpha_ns = cg.esphome_ns.namespace("grundfos_alpha")
 GrundfosAlpha = grundfos_alpha_ns.class_("GrundfosAlpha", genibus.GenibusDevice)
 
-# A poll is one request per object read, and a request without an answer takes the bus's 1 s timeout and 250 ms
-# quiet period. An update is skipped while the last poll still runs, so a shorter interval only keeps the pump's
-# Bluetooth link busy.
+# One poll with all entities is about a dozen requests, and a request without an answer takes the bus's 1 s
+# timeout and 250 ms quiet period. An update is skipped while the last poll still runs, so a shorter interval only
+# keeps the pump's Bluetooth link busy.
 MIN_UPDATE_INTERVAL = cv.TimePeriod(seconds=5)
 validate_update_interval = cv.All(cv.update_interval, cv.Range(min=MIN_UPDATE_INTERVAL))
 
