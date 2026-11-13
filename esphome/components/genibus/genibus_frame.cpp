@@ -53,6 +53,13 @@ uint8_t *put_command(uint8_t *dst, uint8_t command) {
   return dst;
 }
 
+uint8_t *put_get_text(uint8_t *dst, uint8_t id) {
+  *dst++ = CLASS_ASCII;
+  *dst++ = OPERATION_GET | 1;
+  *dst++ = id;
+  return dst;
+}
+
 bool ApduReader::next(Apdu &apdu) {
   if (this->rest_.size() < 2)
     return false;
@@ -77,6 +84,16 @@ bool parse_data_object(const Apdu &apdu, DataObject &object) {
   object.type = encode_uint16(data[1], data[2]);
   object.version = data[3];
   object.body = data.subspan(DATA_OBJECT_HEADER_SIZE);
+  return true;
+}
+
+bool parse_text(const Apdu &apdu, std::span<const uint8_t> &text) {
+  if (apdu.data_class != CLASS_ASCII || apdu.ack != 0 || apdu.data.empty() || apdu.data.back() != 0)
+    return false;
+  const auto chars = apdu.data.first(apdu.data.size() - 1);
+  if (!std::all_of(chars.begin(), chars.end(), [](uint8_t c) { return c >= 0x20 && c < 0x7F; }))
+    return false;
+  text = chars;
   return true;
 }
 

@@ -13,6 +13,7 @@ from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
 
 DEPENDENCIES = ["grundfos_alpha"]
 
+CONF_AUTOMATIC_NIGHT_SETBACK = "automatic_night_setback"
 CONF_CLOCK_PROGRAM = "clock_program"
 CONF_PUMP_KICK = "pump_kick"
 
@@ -41,6 +42,7 @@ def _switch_schema(icon: str) -> cv.Schema:
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_GRUNDFOS_ALPHA_ID): cv.use_id(GrundfosAlpha),
+        cv.Optional(CONF_AUTOMATIC_NIGHT_SETBACK): _switch_schema("mdi:weather-night"),
         cv.Optional(CONF_PUMP_KICK): _switch_schema("mdi:refresh-auto"),
         cv.Optional(CONF_CLOCK_PROGRAM): _switch_schema("mdi:calendar-clock"),
     }
@@ -53,6 +55,11 @@ async def to_code(config: ConfigType) -> None:
     cg.add_define("USE_GRUNDFOS_ALPHA_WRITE")
     switches = switch.sub_switches(config, parent=hub)
     # The hub publishes the state it reads back after the write
+    await switches(
+        CONF_AUTOMATIC_NIGHT_SETBACK,
+        hub.set_automatic_night_setback_switch,
+        apply="write_automatic_night_setback(state)",
+    )
     await switches(
         CONF_PUMP_KICK, hub.set_pump_kick_switch, apply="write_pump_kick(state)"
     )
