@@ -68,7 +68,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(CONF_CURRENT): _schema(UNIT_AMPERE, 3, DEVICE_CLASS_CURRENT),
         cv.Optional(CONF_POWER): _schema(UNIT_WATT, 1, DEVICE_CLASS_POWER),
         cv.Optional(CONF_SPEED): _schema(UNIT_REVOLUTIONS_PER_MINUTE, 0),
-        # The counters can fall back after a power cut; the component holds the highest value (see publish_)
+        # Published as the pump reports it; operating hours and starts are held over the small fall after a power
+        # cut (see publish_)
         cv.Optional(CONF_ENERGY): sensor.sensor_schema(
             unit_of_measurement=UNIT_KILOWATT_HOURS,
             accuracy_decimals=3,
