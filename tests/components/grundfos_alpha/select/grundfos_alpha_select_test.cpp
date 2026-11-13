@@ -287,6 +287,33 @@ TEST_F(SelectTest, ReplyAfterTheQuietPeriodIsRefusedByItsApduCount) {
   this->read_all_();
 }
 
+// One object per request: a late reply after a timeout passes the APDU count of the next request, but not its type.
+// The chain stops there, so the reply still on its way finds no request and shifts nothing more.
+TEST_F(SelectTest, LateReplyOfAnotherTypeStopsThePollChain) {
+  this->use_all_();
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_RECORDED_POLL);
+  this->run_(TIMEOUT_MS);
+  this->run_(QUIET_MS);
+  ASSERT_EQ(this->bus_.written.back(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  this->pump_.update();  // one object per request from now on
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->run_(TIMEOUT_MS);
+  this->run_(QUIET_MS);
+  ASSERT_EQ(this->bus_.written.back(), FRAME_MOTOR);
+  const size_t sent = this->bus_.written.size();
+  this->reply_(REPLY_PROCESS);  // the late answer to 93/289, taken for 87/69
+  EXPECT_EQ(this->bus_.written.size(), sent);
+  this->reply_(REPLY_MOTOR);  // no request waits for it
+  EXPECT_EQ(this->bus_.written.size(), sent);
+  EXPECT_FALSE(this->control_mode_.has_state());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  EXPECT_EQ(this->next_request_(), FRAME_MOTOR);
+}
+
 // A failed reply may still be answered late; a write waits for the next clean reply or update()
 TEST_F(SelectTest, WriteWaitsForACleanReplyAfterAFailedOne) {
   this->use_all_();
@@ -489,6 +516,27 @@ TEST_F(SelectTest, WriteWaitsWhenTheFirstPollFailed) {
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // now the write
   this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
   EXPECT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);
+}
+
+TEST_F(SelectTest, WriteWithoutAValidReadIsDroppedAfterSomeUpdates) {
+  this->use_selects_();
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_V2, REPLY_OPERATING_MODE_NORMAL}));  // never a valid read of 86/10
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  for (uint8_t i = 1; i < WRITE_WAIT_CYCLES; i++) {
+    this->pump_.update();
+    ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+    this->reply_(bundle({REPLY_CONTROL_MODE_V2, REPLY_OPERATING_MODE_NORMAL}));
+  }
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  this->pump_.update();
+  EXPECT_TRUE(this->pump_.status_has_warning());
+  // The write is gone: a valid read of 86/10 now starts nothing
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->wrote_(FRAME_SET_CONTROL_MODE_CURVE));
 }
 
 TEST_F(SelectTest, UnsupportedModelOffersNoWrite) {
