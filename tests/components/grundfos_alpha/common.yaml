@@ -6,11 +6,22 @@ genibus_ble:
   - id: grundfos_alpha_bus
     ble_client_id: grundfos_alpha_blec
 
+wifi:
+  ssid: MySSID
+  password: password1
+
+api:
+
+time:
+  - platform: homeassistant
+    id: grundfos_alpha_time
+
 grundfos_alpha:
   id: grundfos_alpha_pump
   genibus_id: grundfos_alpha_bus
   address: 0xE7
   update_interval: 30s
+  time_id: grundfos_alpha_time
 
 sensor:
   - platform: grundfos_alpha
@@ -29,6 +40,18 @@ sensor:
       name: Pump power
     speed:
       name: Pump speed
+    energy:
+      name: Pump energy
+    operating_hours:
+      name: Pump operating hours
+    starts:
+      name: Pump starts
+    warning_code:
+      name: Pump warning code
+    alarm_code:
+      name: Pump alarm code
+    clock_deviation:
+      name: Pump clock deviation
 
 text_sensor:
   - platform: grundfos_alpha
@@ -37,6 +60,16 @@ text_sensor:
       name: Pump operating mode in effect
     control_source:
       name: Pump control source
+    product_name:
+      name: Pump product name
+    product_number:
+      name: Pump product number
+    software_version:
+      name: Pump software version
+    bluetooth_software_version:
+      name: Pump Bluetooth software version
+    last_event:
+      name: Pump last event
 
 select:
   - platform: grundfos_alpha
@@ -55,6 +88,16 @@ number:
       name: Pump proportional pressure set point
     constant_speed_setpoint:
       name: Pump constant speed set point
+    autoadapt_radiator_setpoint:
+      name: Pump radiator set point
+    autoadapt_underfloor_setpoint:
+      name: Pump underfloor heating set point
+    autoadapt_radiator_and_underfloor_setpoint:
+      name: Pump radiator and underfloor heating set point
+    pump_kick_wait:
+      name: Pump kick wait
+    pump_kick_duration:
+      name: Pump kick duration
 
 button:
   - platform: grundfos_alpha
@@ -65,3 +108,19 @@ button:
       name: Pump stop
     reset_alarm:
       name: Pump reset alarm
+    start_air_venting:
+      name: Pump start air venting
+    stop_air_venting:
+      name: Pump stop air venting
+    clear_alarm_log:
+      name: Pump clear alarm log
+
+switch:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    automatic_night_setback:
+      name: Pump automatic night setback
+    pump_kick:
+      name: Pump kick
+    clock_program:
+      name: Pump clock program

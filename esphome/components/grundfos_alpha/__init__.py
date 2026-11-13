@@ -1,7 +1,7 @@
 import esphome.codegen as cg
-from esphome.components import genibus
+from esphome.components import genibus, time
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_UPDATE_INTERVAL
+from esphome.const import CONF_ID, CONF_TIME_ID, CONF_UPDATE_INTERVAL
 from esphome.types import ConfigType
 
 AUTO_LOAD = ["genibus"]
@@ -28,6 +28,8 @@ CONFIG_SCHEMA = (
     .extend(
         {
             cv.Optional(CONF_UPDATE_INTERVAL, default="30s"): validate_update_interval,
+            # Sets the pump's clock to the local time at each connection and once a day
+            cv.Optional(CONF_TIME_ID): cv.use_id(time.RealTimeClock),
         }
     )
 )
@@ -36,3 +38,6 @@ CONFIG_SCHEMA = (
 async def to_code(config: ConfigType) -> None:
     var = cg.new_Pvariable(config[CONF_ID])
     await genibus.register_genibus_device(var, config)
+    if (time_id := config.get(CONF_TIME_ID)) is not None:
+        cg.add_define("USE_GRUNDFOS_ALPHA_CLOCK")
+        cg.add(var.set_time_id(await cg.get_variable(time_id)))

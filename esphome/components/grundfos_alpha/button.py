@@ -8,18 +8,24 @@ from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha, grundfos_alpha_ns
 
 DEPENDENCIES = ["grundfos_alpha"]
 
+CONF_CLEAR_ALARM_LOG = "clear_alarm_log"
 CONF_RESET_ALARM = "reset_alarm"
 CONF_START = "start"
+CONF_START_AIR_VENTING = "start_air_venting"
+CONF_STOP_AIR_VENTING = "stop_air_venting"
 
 Command = grundfos_alpha_ns.enum("Command", is_class=True)
 
-# The class 3 commands the Grundfos GO app sends to an ALPHA3. Whether a stop lasts through a loss of power is not
-# tested yet.
+# The class 3 commands and the air venting the Grundfos GO app sends to an ALPHA3. Whether a stop lasts through a
+# loss of power is not tested yet.
 # key: icon
 _BUTTONS = {
     CONF_START: "mdi:play",
     CONF_STOP: "mdi:stop",
     CONF_RESET_ALARM: "mdi:alarm-off",
+    CONF_START_AIR_VENTING: "mdi:weather-windy",
+    CONF_STOP_AIR_VENTING: "mdi:stop-circle-outline",
+    CONF_CLEAR_ALARM_LOG: "mdi:delete-sweep",
 }
 
 CONFIG_SCHEMA = cv.Schema(
@@ -51,4 +57,19 @@ async def to_code(config: ConfigType) -> None:
         CONF_RESET_ALARM,
         hub.set_reset_alarm_button,
         apply=f"send_command({Command.COMMAND_RESET_ALARM})",
+    )
+    await buttons(
+        CONF_START_AIR_VENTING,
+        hub.set_start_air_venting_button,
+        apply="write_air_venting(true)",
+    )
+    await buttons(
+        CONF_STOP_AIR_VENTING,
+        hub.set_stop_air_venting_button,
+        apply="write_air_venting(false)",
+    )
+    await buttons(
+        CONF_CLEAR_ALARM_LOG,
+        hub.set_clear_alarm_log_button,
+        apply=f"send_command({Command.COMMAND_RESET_ALARM_LOG})",
     )

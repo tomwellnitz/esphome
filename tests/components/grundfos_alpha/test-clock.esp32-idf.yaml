@@ -1,0 +1,32 @@
+# The clock without select, number or button: USE_GRUNDFOS_ALPHA_CLOCK without USE_GRUNDFOS_ALPHA_WRITE
+packages:
+  ble: !include ../../test_build_components/common/ble/esp32-idf.yaml
+
+ble_client:
+  - mac_address: 01:02:03:04:05:18
+    id: grundfos_alpha_clock_blec
+
+genibus_ble:
+  id: grundfos_alpha_clock_bus
+  ble_client_id: grundfos_alpha_clock_blec
+
+wifi:
+  ssid: MySSID
+  password: password1
+
+api:
+
+time:
+  - platform: homeassistant
+    id: grundfos_alpha_clock_time
+
+grundfos_alpha:
+  id: grundfos_alpha_clock_pump
+  genibus_id: grundfos_alpha_clock_bus
+  time_id: grundfos_alpha_clock_time
+
+sensor:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_clock_pump
+    clock_deviation:
+      name: Pump clock deviation
