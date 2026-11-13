@@ -26,6 +26,8 @@ static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING;
 static constexpr float PASCAL_PER_METER = 9804.0f;
 static constexpr float SECONDS_PER_HOUR = 3600.0f;
 static constexpr float WATT_SECONDS_PER_KILOWATT_HOUR = 3.6e6f;
+// A 93/1 counter that falls to less than this share of its highest value was reset; a real ALPHA3 lost about an hour
+static constexpr float COUNTER_HOLD_SHARE = 0.9f;
 
 // Object layouts and field names from the Grundfos GENI profile in the Grundfos GO app 8.5.2
 // (ALPHA3 Model B: profile 52_1_0, version V01.11.00.00037). The alpha3 component reads the same requests,
@@ -48,7 +50,7 @@ static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
     {Reading::READING_SPEED, 20, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
 // 87/1, type 0x00E8 v1: system_energy (double, Ws), system_power, then a counted list of one entry per pump.
-// Whether system_energy also falls back after a power cut is not known yet; it is held like 93/1 (see publish_).
+// Whether system_energy also falls back after a power cut is not known; it is published as the pump reports it.
 static constexpr Field ALPHA3_ENERGY_FIELDS[] = {
     {Reading::READING_ENERGY, 0, FieldFormat::FIELD_FORMAT_DOUBLE, 1.0f / WATT_SECONDS_PER_KILOWATT_HOUR},
 };
@@ -424,13 +426,15 @@ bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
 
 void GrundfosAlpha::publish_(Reading reading, float value) {
 #ifdef USE_SENSOR
-  // A counter that falls back after a power cut keeps its highest value until it passes it again, so that
-  // total_increasing sensors do not go down. A restart of the ESP forgets the highest values.
-  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_ENERGY);
+  // A 93/1 counter that falls back a little after a power cut keeps its highest value until it passes it again, so
+  // that total_increasing sensors do not go down. A larger fall, such as another pump or a factory reset, is
+  // published as it is. A restart of the ESP forgets the highest values.
+  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_OPERATING_HOURS);
   if (total < this->totals_.size() && !std::isnan(value)) {
-    if (value < this->totals_[total])
-      value = this->totals_[total];
-    this->totals_[total] = value;
+    float &held = this->totals_[total];
+    if (value < held && value >= held * COUNTER_HOLD_SHARE)
+      value = held;
+    held = value;
   }
   PUBLISH_STATE(this->sensor_(reading), value);
 #endif
