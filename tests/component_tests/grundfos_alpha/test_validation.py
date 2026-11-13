@@ -59,3 +59,9 @@ def test_switch_rejects_restore_options(switch: str, key: str, value: object) ->
 def test_switch_does_not_restore(switch: str) -> None:
     config = SWITCH_SCHEMA.schema[switch]({"name": "Pump"})
     assert str(config[CONF_RESTORE_MODE]) == "DISABLED"
+
+
+@pytest.mark.parametrize("switch", [CONF_PUMP_KICK, CONF_CLOCK_PROGRAM])
+def test_switch_rejects_inverted(switch: str) -> None:
+    with pytest.raises(cv.Invalid):
+        SWITCH_SCHEMA.schema[switch]({"name": "Pump", "inverted": True})

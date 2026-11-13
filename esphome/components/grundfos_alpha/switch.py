@@ -1,5 +1,3 @@
-from functools import partial
-
 import esphome.codegen as cg
 from esphome.components import switch
 import esphome.config_validation as cv
@@ -11,51 +9,40 @@ from esphome.const import (
 )
 from esphome.types import ConfigType
 
-from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha, grundfos_alpha_ns
+from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
 
 DEPENDENCIES = ["grundfos_alpha"]
 
 CONF_CLOCK_PROGRAM = "clock_program"
 CONF_PUMP_KICK = "pump_kick"
 
-SwitchSetting = grundfos_alpha_ns.enum("SwitchSetting", is_class=True)
 
-# The pump kick runs a pump that stood still for a while (86/2). The clock program (84/1) switches the weekly
-# schedule and the single events kept in the pump; they are set up in the Grundfos GO app, and their actions can
-# stop the pump.
-# key: (setting, icon)
-_SWITCHES = {
-    CONF_PUMP_KICK: (SwitchSetting.SWITCH_SETTING_PUMP_KICK, "mdi:refresh-auto"),
-    CONF_CLOCK_PROGRAM: (
-        SwitchSetting.SWITCH_SETTING_CLOCK_PROGRAM,
-        "mdi:calendar-clock",
-    ),
-}
+def _switch_schema(icon: str) -> cv.Schema:
+    return switch.switch_schema(
+        switch.ApplySwitch,
+        block_inverted=True,
+        default_restore_mode="DISABLED",
+        entity_category=ENTITY_CATEGORY_CONFIG,
+        icon=icon,
+    ).extend(
+        {
+            # The pump keeps the setting, and nothing is written before the pump is connected
+            cv.Optional(key): cv.invalid(
+                "Not supported: the switch shows the setting read from the pump"
+            )
+            for key in (CONF_RESTORE_MODE, CONF_RESTORE_STATE, CONF_INITIAL_STATE)
+        }
+    )
 
+
+# The pump kick runs a pump that stood still for a while (86/2). The clock program (84/1) switches all weekly
+# schedule and single events kept in the pump; they are set up in the Grundfos GO app and not offered here. Their
+# actions can stop the pump: action 1 is a stop from the factory.
 CONFIG_SCHEMA = cv.Schema(
     {
         cv.GenerateID(CONF_GRUNDFOS_ALPHA_ID): cv.use_id(GrundfosAlpha),
-        **{
-            cv.Optional(key): switch.switch_schema(
-                switch.ApplySwitch,
-                default_restore_mode="DISABLED",
-                entity_category=ENTITY_CATEGORY_CONFIG,
-                icon=icon,
-            ).extend(
-                {
-                    # The pump keeps the setting, and nothing is written before the pump is connected
-                    cv.Optional(option): cv.invalid(
-                        "Not supported: the switch shows the setting read from the pump"
-                    )
-                    for option in (
-                        CONF_RESTORE_MODE,
-                        CONF_RESTORE_STATE,
-                        CONF_INITIAL_STATE,
-                    )
-                }
-            )
-            for key, (_, icon) in _SWITCHES.items()
-        },
+        cv.Optional(CONF_PUMP_KICK): _switch_schema("mdi:refresh-auto"),
+        cv.Optional(CONF_CLOCK_PROGRAM): _switch_schema("mdi:calendar-clock"),
     }
 )
 
@@ -66,9 +53,11 @@ async def to_code(config: ConfigType) -> None:
     cg.add_define("USE_GRUNDFOS_ALPHA_WRITE")
     switches = switch.sub_switches(config, parent=hub)
     # The hub publishes the state it reads back after the write
-    for key, (setting, _) in _SWITCHES.items():
-        await switches(
-            key,
-            partial(hub.set_switch, setting),
-            apply=f"write_switch({setting}, state)",
-        )
+    await switches(
+        CONF_PUMP_KICK, hub.set_pump_kick_switch, apply="write_pump_kick(state)"
+    )
+    await switches(
+        CONF_CLOCK_PROGRAM,
+        hub.set_clock_program_switch,
+        apply="write_clock_program(state)",
+    )

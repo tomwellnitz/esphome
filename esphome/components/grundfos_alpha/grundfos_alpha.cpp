@@ -92,10 +92,7 @@ static float read_float(const uint8_t *at) { return bit_cast<float>(encode_uint3
 
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
 static uint32_t read_unsigned(const uint8_t *at, uint8_t width) {
-  uint32_t value = 0;
-  for (uint8_t i = 0; i < width; i++)
-    value = (value << 8) | at[i];
-  return value;
+  return width == 4 ? encode_uint32(at[0], at[1], at[2], at[3]) : encode_uint16(at[0], at[1]);
 }
 #endif
 
@@ -158,13 +155,9 @@ static_assert(SET_POINT_COUNT + std::size(PUMP_KICK_NUMBERS) ==
 #endif
 
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
-/// The bool behind a switch: bit 0 of the byte at offset.
-struct SwitchLayout {
-  Setting setting;
-  uint8_t offset;
-};
-// 86/2 enabled and 84/1 clock_program_enabled, in the order of SwitchSetting
-static constexpr SwitchLayout SWITCHES[] = {{Setting::SETTING_PUMP_KICK, 0}, {Setting::SETTING_CLOCK_PROGRAM, 4}};
+// The bools behind the switches, bit 0 of the byte: 86/2 enabled and 84/1 clock_program_enabled
+static constexpr uint8_t OFFSET_PUMP_KICK_ENABLED = 0;
+static constexpr uint8_t OFFSET_CLOCK_PROGRAM_ENABLED = 4;
 #endif
 
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
@@ -218,8 +211,8 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "Pump kick duration", this->numbers_[4]);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
-  LOG_SWITCH("  ", "Pump kick", this->switches_[0]);
-  LOG_SWITCH("  ", "Clock program", this->switches_[1]);
+  LOG_SWITCH("  ", "Pump kick", this->pump_kick_switch_);
+  LOG_SWITCH("  ", "Clock program", this->clock_program_switch_);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
   LOG_BUTTON("  ", "Start", this->start_button_);
@@ -486,10 +479,10 @@ bool GrundfosAlpha::wants_setting_(Setting setting) const {
     return true;
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
-  for (size_t i = 0; i < std::size(SWITCHES); i++) {
-    if (SWITCHES[i].setting == setting && this->switches_[i] != nullptr)
-      return true;
-  }
+  if (setting == Setting::SETTING_PUMP_KICK && this->pump_kick_switch_ != nullptr)
+    return true;
+  if (setting == Setting::SETTING_CLOCK_PROGRAM && this->clock_program_switch_ != nullptr)
+    return true;
 #endif
   return false;
 }
@@ -574,10 +567,10 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
   }
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
-  for (size_t i = 0; i < std::size(SWITCHES); i++) {
-    if (SWITCHES[i].setting == setting)
-      PUBLISH_STATE(this->switches_[i], (body[SWITCHES[i].offset] & 0x01) != 0);
-  }
+  if (setting == Setting::SETTING_PUMP_KICK)
+    PUBLISH_STATE(this->pump_kick_switch_, (body[OFFSET_PUMP_KICK_ENABLED] & 0x01) != 0);
+  if (setting == Setting::SETTING_CLOCK_PROGRAM)
+    PUBLISH_STATE(this->clock_program_switch_, (body[OFFSET_CLOCK_PROGRAM_ENABLED] & 0x01) != 0);
 #endif
 }
 #endif
@@ -623,12 +616,20 @@ void GrundfosAlpha::write_number(NumberSetting setting, float value) {
 #endif
 
 #ifdef USE_SWITCH
-void GrundfosAlpha::write_switch(SwitchSetting setting, bool state) {
-  const size_t i = static_cast<size_t>(setting);
-  if (i >= std::size(SWITCHES) || this->switches_[i] == nullptr)
-    return;
-  this->enqueue_({SWITCHES[i].setting, SWITCHES[i].offset, WIDTH_BIT, state, Command::COMMAND_NONE},
-                 setting == SwitchSetting::SWITCH_SETTING_PUMP_KICK ? LOG_STR("Pump kick") : LOG_STR("Clock program"));
+// Without its entity the object is not polled, and the write would wait for ever
+void GrundfosAlpha::write_pump_kick(bool state) {
+  if (this->pump_kick_switch_ != nullptr) {
+    this->enqueue_({Setting::SETTING_PUMP_KICK, OFFSET_PUMP_KICK_ENABLED, WIDTH_BIT, state, Command::COMMAND_NONE},
+                   LOG_STR("Pump kick"));
+  }
+}
+
+void GrundfosAlpha::write_clock_program(bool state) {
+  if (this->clock_program_switch_ != nullptr) {
+    this->enqueue_(
+        {Setting::SETTING_CLOCK_PROGRAM, OFFSET_CLOCK_PROGRAM_ENABLED, WIDTH_BIT, state, Command::COMMAND_NONE},
+        LOG_STR("Clock program"));
+  }
 }
 #endif
 
@@ -771,12 +772,20 @@ const SettingLayout &GrundfosAlpha::job_layout_() const {
 
 void GrundfosAlpha::apply_job_() {
   uint8_t *at = &this->job_body_[this->job_.offset];
-  if (this->job_.width == WIDTH_BIT) {
-    *at = (*at & 0xFE) | (this->job_.value & 0x01);
-    return;
+  switch (this->job_.width) {
+    case WIDTH_BIT:
+      *at = (*at & 0xFE) | (this->job_.value & 0x01);
+      break;
+    case 1:
+      *at = static_cast<uint8_t>(this->job_.value);
+      break;
+    case 2:
+      put_be16(at, static_cast<uint16_t>(this->job_.value));
+      break;
+    default:
+      put_be32(at, this->job_.value);
+      break;
   }
-  for (uint8_t i = 0; i < this->job_.width; i++)
-    at[i] = static_cast<uint8_t>(this->job_.value >> (8 * (this->job_.width - 1 - i)));
 }
 
 bool GrundfosAlpha::same_outside_value_(std::span<const uint8_t> body) const {

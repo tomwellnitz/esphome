@@ -92,7 +92,6 @@ enum class NumberSetting : uint8_t {
   NUMBER_SETTING_COUNT,
 };
 static constexpr size_t SET_POINT_COUNT = static_cast<size_t>(NumberSetting::NUMBER_SETTING_PUMP_KICK_WAIT);
-enum class SwitchSetting : uint8_t { SWITCH_SETTING_PUMP_KICK, SWITCH_SETTING_CLOCK_PROGRAM, SWITCH_SETTING_COUNT };
 
 enum class JobPhase : uint8_t {
   JOB_PHASE_NONE,
@@ -168,6 +167,10 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   SUB_BUTTON(stop)
   SUB_BUTTON(reset_alarm)
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  SUB_SWITCH(pump_kick)
+  SUB_SWITCH(clock_program)
+#endif
 
  public:
   void update() override;
@@ -191,10 +194,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   void write_number(NumberSetting setting, float value);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
-  void set_switch(SwitchSetting setting, switch_::Switch *entity) {
-    this->switches_[static_cast<size_t>(setting)] = entity;
-  }
-  void write_switch(SwitchSetting setting, bool state);
+  void write_pump_kick(bool state);
+  /// Switch the weekly schedule and single events kept in the pump; their actions can stop the pump.
+  void write_clock_program(bool state);
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   void send_command(Command command);
@@ -258,9 +260,6 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   // The set point limits the pump reports, in Pa or rpm
   std::array<float, SET_POINT_COUNT> min_{};
   std::array<float, SET_POINT_COUNT> max_{};
-#endif
-#ifdef USE_SWITCH
-  std::array<switch_::Switch *, static_cast<size_t>(SwitchSetting::SWITCH_SETTING_COUNT)> switches_{};
 #endif
   // The body of each settings object at its last valid read, to check a read before a write against it
   std::array<std::array<uint8_t, MAX_WRITE_SIZE>, static_cast<size_t>(Setting::SETTING_COUNT)> last_body_{};
