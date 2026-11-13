@@ -1,0 +1,66 @@
+#pragma once
+
+#include <cstdint>
+#include <span>
+
+#include "esphome/components/genibus/genibus.h"
+#include "esphome/components/sensor/sensor.h"
+
+namespace esphome::genibus {
+
+enum class ValueType : uint8_t {
+  VALUE_TYPE_UINT8,
+  VALUE_TYPE_UINT16,
+  VALUE_TYPE_UINT32,
+  VALUE_TYPE_INT8,
+  VALUE_TYPE_INT16,
+  VALUE_TYPE_INT32,
+  VALUE_TYPE_FLOAT,
+  VALUE_TYPE_DOUBLE,
+};
+
+/// Size in bytes of a value of type.
+uint8_t value_size(ValueType type);
+/// Read the big-endian value of type at offset of body; NAN when it does not fit into body.
+float read_value(std::span<const uint8_t> body, uint8_t offset, ValueType type);
+
+/// Draft: one value at a fixed offset of a class 10 data object, read at every update. It never writes.
+/// With an expected type or version set, a reply with another type or version is not decoded.
+class GenibusSensor : public sensor::Sensor, public GenibusDevice {
+ public:
+  GenibusSensor(uint8_t object, uint16_t sub_id, uint8_t offset, ValueType type)
+      : sub_id_(sub_id), object_(object), offset_(offset), type_(type) {}
+
+  void set_expected_type(uint16_t type) {
+    this->expected_type_ = type;
+    this->check_type_ = true;
+  }
+  void set_expected_version(uint8_t version) {
+    this->expected_version_ = version;
+    this->check_version_ = true;
+  }
+  void set_multiply(float multiply) { this->multiply_ = multiply; }
+
+  void update() override;
+  void dump_config() override;
+  void on_response(const GenibusResponse &response) override;
+  void on_connected() override { this->update(); }
+  void on_disconnected() override;
+
+ protected:
+  float decode_(const GenibusResponse &response);
+
+  float multiply_{1.0f};
+  uint16_t sub_id_;
+  uint16_t expected_type_{0};
+  uint8_t object_;
+  uint8_t offset_;
+  ValueType type_;
+  uint8_t expected_version_{0};
+  bool check_type_{false};
+  bool check_version_{false};
+  bool missing_{false};  // the device has no such object; asked again after the next connection
+  bool warned_{false};
+};
+
+}  // namespace esphome::genibus
