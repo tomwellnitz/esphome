@@ -152,6 +152,24 @@ TEST_F(CommandTest, CommandWaitsForARunningWrite) {
   EXPECT_EQ(this->next_request_(), FRAME_COMMAND_5);
 }
 
+TEST_F(CommandTest, CommandBehindAWriteWithoutValidReadWaitsUntilTheWriteIsDropped) {
+  this->use_selects_();
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(
+      bundle({REPLY_CONTROL_MODE_V2, REPLY_OPERATING_MODE_NORMAL}));  // no valid read of 86/10: its write waits
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  this->pump_.send_command(Command::COMMAND_START);
+  EXPECT_TRUE(this->next_request_().empty());
+  for (uint8_t i = 1; i < WRITE_WAIT_CYCLES; i++) {
+    this->pump_.update();
+    ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+    this->reply_(bundle({REPLY_CONTROL_MODE_V2, REPLY_OPERATING_MODE_NORMAL}));
+  }
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_COMMAND_6);
+}
+
 TEST_F(CommandTest, WaitingCommandIsDroppedOnDisconnect) {
   this->read_selects_();
   this->write_curve_until_set_();
