@@ -49,6 +49,8 @@ inline const Bytes REPLY_FAULT_NONE = {0x24, 0x11, 0xF8, 0xE7, 0x0A, 0x0D, 0x00,
 // Test vector: warning 21 (too many starts per hour), alarm 57 (dry running), highest 57
 inline const Bytes REPLY_FAULT_ACTIVE = {0x24, 0x11, 0xF8, 0xE7, 0x0A, 0x0D, 0x00, 0x01, 0x0A, 0x01, 0x00,
                                          0x00, 0x06, 0x00, 0x15, 0x00, 0x39, 0x00, 0x39, 0x2C, 0x0F};
+// The three objects fit one request; their replies are 87 bytes of APDUs
+inline const Bytes FRAME_DIAGNOSTICS = bundle({FRAME_ENERGY, FRAME_HISTORY, FRAME_FAULT});
 
 class GrundfosAlphaDiagnosticsTest : public PumpTest {
  protected:
@@ -63,12 +65,8 @@ class GrundfosAlphaDiagnosticsTest : public PumpTest {
 
   void read_all_(const Bytes &fault = REPLY_FAULT_NONE) {
     this->identify_();
-    ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
-    this->reply_(REPLY_ENERGY);
-    ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
-    this->reply_(REPLY_HISTORY);
-    ASSERT_EQ(this->next_request_(), FRAME_FAULT);
-    this->reply_(fault);
+    ASSERT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
+    this->reply_(bundle({REPLY_ENERGY, REPLY_HISTORY, fault}));
   }
 
   sensor::Sensor energy_, operating_hours_, starts_, warning_code_, alarm_code_;
@@ -134,16 +132,11 @@ TEST_F(GrundfosAlphaDiagnosticsTest, FollowsTheMeasurementsInOnePoll) {
   this->pump_.set_flow_sensor(&flow);
   this->pump_.set_power_sensor(&power);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
-  this->reply_(REPLY_PROCESS);
-  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
-  this->reply_(REPLY_MOTOR);
-  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
-  this->reply_(REPLY_ENERGY);
-  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
-  this->reply_(REPLY_HISTORY);
-  ASSERT_EQ(this->next_request_(), FRAME_FAULT);
-  this->reply_(REPLY_FAULT_NONE);
+  // 93/289, 87/69 and 87/1 would answer with 114 bytes, more than the measured 111
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
+  ASSERT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
+  this->reply_(bundle({REPLY_ENERGY, REPLY_HISTORY, REPLY_FAULT_NONE}));
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FLOAT_EQ(power.state, 19.5f);
   EXPECT_FLOAT_EQ(this->starts_.state, 1849.0f);
@@ -151,45 +144,41 @@ TEST_F(GrundfosAlphaDiagnosticsTest, FollowsTheMeasurementsInOnePoll) {
 
 TEST_F(GrundfosAlphaDiagnosticsTest, UnexpectedVersionGivesNanAndChainGoesOn) {
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
-  this->reply_(REPLY_ENERGY);
-  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
-  this->reply_(REPLY_HISTORY_V1);
+  ASSERT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
+  this->reply_(bundle({REPLY_ENERGY, REPLY_HISTORY_V1, REPLY_FAULT_NONE}));
   EXPECT_TRUE(this->starts_.has_state());
   EXPECT_TRUE(std::isnan(this->starts_.state));
   EXPECT_TRUE(std::isnan(this->operating_hours_.state));
-  ASSERT_EQ(this->next_request_(), FRAME_FAULT);
-  this->reply_(REPLY_FAULT_NONE);
+  EXPECT_NEAR(this->energy_.state, 65.4737f, 0.0005f);
   EXPECT_FLOAT_EQ(this->alarm_code_.state, 0.0f);
   EXPECT_FALSE(this->pump_.status_has_warning());
+  // The next poll asks for all three again
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
 }
 
 TEST_F(GrundfosAlphaDiagnosticsTest, ErrorAckGivesNan) {
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
-  this->reply_(REPLY_PROCESS_ID_UNKNOWN);
+  ASSERT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
+  this->reply_(bundle({REPLY_PROCESS_ID_UNKNOWN, REPLY_HISTORY, REPLY_FAULT_NONE}));
   EXPECT_TRUE(std::isnan(this->energy_.state));
-  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  EXPECT_FLOAT_EQ(this->starts_.state, 1849.0f);
+  EXPECT_TRUE(this->next_request_().empty());
 }
 
 TEST_F(GrundfosAlphaDiagnosticsTest, MissingObjectIsSkippedUntilReconnect) {
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
-  this->reply_(REPLY_OBJECT_MISSING);
+  ASSERT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
+  this->reply_(bundle({REPLY_OBJECT_MISSING, REPLY_HISTORY, REPLY_FAULT_NONE}));
   EXPECT_TRUE(std::isnan(this->energy_.state));
-  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
-  this->reply_(REPLY_HISTORY);
-  ASSERT_EQ(this->next_request_(), FRAME_FAULT);
-  this->reply_(REPLY_FAULT_NONE);
+  EXPECT_TRUE(this->next_request_().empty());
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
-  this->reply_(REPLY_HISTORY);
-  ASSERT_EQ(this->next_request_(), FRAME_FAULT);
-  this->reply_(REPLY_FAULT_NONE);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_HISTORY, FRAME_FAULT}));
+  this->reply_(bundle({REPLY_HISTORY, REPLY_FAULT_NONE}));
   EXPECT_TRUE(this->next_request_().empty());
   this->bus_.lose_connection();
   this->bus_.establish_connection();
-  EXPECT_EQ(this->next_request_(), FRAME_ENERGY);
+  EXPECT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
 }
 
 TEST_F(GrundfosAlphaDiagnosticsTest, CountersHoldTheirHighestValueAfterAPowerCut) {
@@ -234,12 +223,8 @@ TEST_F(GrundfosAlphaDiagnosticsTest, EnergyHoldsItsHighestValue) {
 TEST_F(GrundfosAlphaDiagnosticsTest, FaultCodesFallBackToZero) {
   this->read_all_(REPLY_FAULT_ACTIVE);
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
-  this->reply_(REPLY_ENERGY);
-  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
-  this->reply_(REPLY_HISTORY);
-  ASSERT_EQ(this->next_request_(), FRAME_FAULT);
-  this->reply_(REPLY_FAULT_NONE);
+  ASSERT_EQ(this->next_request_(), FRAME_DIAGNOSTICS);
+  this->reply_(bundle({REPLY_ENERGY, REPLY_HISTORY, REPLY_FAULT_NONE}));
   EXPECT_FLOAT_EQ(this->warning_code_.state, 0.0f);
   EXPECT_FLOAT_EQ(this->alarm_code_.state, 0.0f);
 }

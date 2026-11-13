@@ -353,6 +353,24 @@ TEST_F(ClockTest, MeasurementsFollowTheCheck) {
   EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
 }
 
+// The poll after the check asks for several objects in one request and decodes their reply
+TEST_F(ClockTest, BundledPollFollowsTheCheck) {
+  sensor::Sensor flow, power;
+  this->pump_.set_flow_sensor(&flow);
+  this->pump_.set_power_sensor(&power);
+  this->clock_.now = TIME_20_49_31;
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
+  this->reply_(REPLY_ACTUAL_20_49_31);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
+  EXPECT_FLOAT_EQ(power.state, 19.5f);
+  EXPECT_TRUE(this->next_request_().empty());
+  // The next update polls without a check
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+}
+
 // Without a time source the pump's clock is left alone
 TEST_F(PumpTest, ClockIsLeftAloneWithoutATimeSource) {
   this->identify_();

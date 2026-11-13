@@ -357,4 +357,43 @@ TEST_F(PumpTest, NoSettingsReadWithoutEntities) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
+// The event log joins the measurements and settings in one request; the entry of its latest event is known only from
+// the reply, so it is read in the next request
+TEST_F(PumpTest, EventLogIsBundledAndTheEntryFollows) {
+  sensor::Sensor flow;
+  text_sensor::TextSensor operating_mode, last_event;
+  this->pump_.set_flow_sensor(&flow);
+  this->pump_.set_operating_mode_text_sensor(&operating_mode);
+  this->pump_.set_last_event_text_sensor(&last_event);
+  this->identify_();
+  const Bytes poll = bundle({FRAME_PROCESS, FRAME_GET_86_8, FRAME_GET_88_10199});
+  ASSERT_EQ(this->next_request_(), poll);
+  this->reply_(bundle({REPLY_PROCESS, REPLY_REALIZED, REPLY_EVENT_LOG_6}));
+  EXPECT_EQ(operating_mode.state, "Normal");
+  ASSERT_EQ(this->next_request_(), FRAME_GET_88_10205);
+  this->reply_(REPLY_EVENT_6);
+  EXPECT_EQ(last_event.state, "Alarm cleared (code 57)");
+  EXPECT_TRUE(this->next_request_().empty());
+  // The same latest event: its entry is not read again
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), poll);
+  this->reply_(bundle({REPLY_PROCESS, REPLY_REALIZED, REPLY_EVENT_LOG_6}));
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
+// A class 7 text never shares a request: the objects before it go first, then the text alone
+TEST_F(PumpTest, TextGoesInARequestOfItsOwn) {
+  sensor::Sensor flow;
+  text_sensor::TextSensor product_name;
+  this->pump_.set_flow_sensor(&flow);
+  this->pump_.set_product_name_text_sensor(&product_name);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_TEXT_1);
+  this->reply_(REPLY_PRODUCT_NAME);
+  EXPECT_EQ(product_name.state, "ALPHA3 25-60 180");
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
 }  // namespace esphome::grundfos_alpha::testing

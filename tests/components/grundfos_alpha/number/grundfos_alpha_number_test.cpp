@@ -2,6 +2,8 @@
 
 #include "esphome/components/number/number.h"
 
+#include <utility>
+
 namespace esphome::grundfos_alpha::testing {
 
 namespace {
@@ -15,6 +17,10 @@ constexpr auto CONSTANT_PRESSURE = NumberSetting::NUMBER_SETTING_CONSTANT_PRESSU
 constexpr auto PROPORTIONAL_PRESSURE = NumberSetting::NUMBER_SETTING_PROPORTIONAL_PRESSURE;
 constexpr auto CONSTANT_SPEED = NumberSetting::NUMBER_SETTING_CONSTANT_SPEED;
 
+// The constant pressure poll: control mode, limits and set point; once the limits are known, without them
+const Bytes FRAME_GET_CP = bundle({FRAME_GET_86_10, FRAME_GET_86_15, FRAME_GET_86_16});
+const Bytes FRAME_GET_CP_NO_LIMITS = bundle({FRAME_GET_86_10, FRAME_GET_86_16});
+
 }  // namespace
 
 class NumberTest : public SelectTest {
@@ -23,12 +29,8 @@ class NumberTest : public SelectTest {
   void read_constant_pressure_(const Bytes &control_mode = REPLY_CONTROL_MODE_CP) {
     this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
     this->identify_();
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-    this->reply_(control_mode);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
-    this->reply_(REPLY_CP_LIMITS);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-    this->reply_(REPLY_CP_SETPOINT);
+    ASSERT_EQ(this->next_request_(), FRAME_GET_CP);
+    this->reply_(bundle({control_mode, REPLY_CP_LIMITS, REPLY_CP_SETPOINT}));
     ASSERT_TRUE(this->next_request_().empty());
   }
 
@@ -46,9 +48,36 @@ TEST_F(NumberTest, ReadsControlModeLimitsOnceAndTheSetPoint) {
   this->read_constant_pressure_();
   EXPECT_NEAR(this->number_.state, 39214.0f / 9804.0f, 1e-4f);
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  EXPECT_EQ(this->next_request_(), FRAME_GET_86_16);
+  EXPECT_EQ(this->next_request_(), FRAME_GET_CP_NO_LIMITS);
+}
+
+// With every entity, a request holds at most 4 objects whose reply is no larger than the largest a real ALPHA3 sent
+// (LE 0x71, FRAME_RECORDED_POLL)
+TEST_F(NumberTest, PollRepliesStayWithinTheRecordedSize) {
+  TestNumber proportional, speed;
+  this->use_all_();
+  this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
+  this->pump_.set_number(PROPORTIONAL_PRESSURE, &proportional);
+  this->pump_.set_number(CONSTANT_SPEED, &speed);
+  this->identify_();
+  const std::pair<Bytes, Bytes> polls[] = {
+      {FRAME_RECORDED_POLL, bundle({REPLY_PROCESS, REPLY_MOTOR, REPLY_REALIZED, REPLY_CONTROL_MODE_CP})},
+      {bundle({FRAME_GET_86_100, FRAME_GET_86_15, FRAME_GET_86_16}),
+       bundle({REPLY_OPERATING_MODE_NORMAL, REPLY_CP_LIMITS, REPLY_CP_SETPOINT})},
+      {bundle({FRAME_GET_86_17, FRAME_GET_86_18, FRAME_GET_86_13}),
+       bundle({REPLY_PP_LIMITS, REPLY_PP_SETPOINT, REPLY_CS_LIMITS})},
+      {FRAME_GET_86_14, REPLY_CS_SETPOINT},
+  };
+  for (const auto &[frame, reply] : polls) {
+    ASSERT_EQ(this->next_request_(), frame);
+    EXPECT_LE(reply[1], REPLY_RECORDED_POLL[1]);
+    this->reply_(reply);
+  }
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_NEAR(this->number_.state, 39214.0f / 9804.0f, 1e-4f);
+  EXPECT_FALSE(std::isnan(proportional.state));
+  EXPECT_FALSE(std::isnan(speed.state));
+  EXPECT_FALSE(this->pump_.status_has_warning());
 }
 
 TEST_F(NumberTest, WritesOnlyTheConstantPressureSetPoint) {
@@ -65,12 +94,8 @@ TEST_F(NumberTest, WritesOnlyTheConstantPressureSetPoint) {
 TEST_F(NumberTest, WritesTheProportionalPressureSetPoint) {
   this->pump_.set_number(PROPORTIONAL_PRESSURE, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_PP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_17);
-  this->reply_(REPLY_PP_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_18);
-  this->reply_(REPLY_PP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_17, FRAME_GET_86_18}));
+  this->reply_(bundle({REPLY_CONTROL_MODE_PP, REPLY_PP_LIMITS, REPLY_PP_SETPOINT}));
   this->pump_.write_number(PROPORTIONAL_PRESSURE, 3.0f);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_18);
   this->reply_(REPLY_PP_SETPOINT);
@@ -85,12 +110,8 @@ TEST_F(NumberTest, WritesTheProportionalPressureSetPoint) {
 TEST_F(NumberTest, WritesTheConstantSpeedSetPointInRpm) {
   this->pump_.set_number(CONSTANT_SPEED, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CURVE);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_13);
-  this->reply_(REPLY_CS_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_14);
-  this->reply_(REPLY_CS_SETPOINT);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_13, FRAME_GET_86_14}));
+  this->reply_(bundle({REPLY_CONTROL_MODE_CURVE, REPLY_CS_LIMITS, REPLY_CS_SETPOINT}));
   EXPECT_FLOAT_EQ(this->number_.state, 5260.0f);
   this->pump_.write_number(CONSTANT_SPEED, 3000.0f);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_14);
@@ -113,20 +134,16 @@ TEST_F(NumberTest, ControlModeWrittenJustBeforeCounts) {
   this->use_selects_();
   this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
-  this->reply_(REPLY_CP_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_100, FRAME_GET_86_15, FRAME_GET_86_16}));
+  this->reply_(
+      bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL, REPLY_CP_LIMITS, REPLY_CP_SETPOINT}));
   ASSERT_TRUE(this->next_request_().empty());
+  const Bytes poll = bundle({FRAME_GET_86_10, FRAME_GET_86_100, FRAME_GET_86_16});
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // a poll is on the wire, so both writes wait
+  ASSERT_EQ(this->next_request_(), poll);  // a poll is on the wire, so both writes wait
   this->pump_.write_select(CONTROL_MODE, 0);
   this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL, REPLY_CP_SETPOINT}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
   ASSERT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CP);
@@ -134,12 +151,8 @@ TEST_F(NumberTest, ControlModeWrittenJustBeforeCounts) {
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_CP);
   // Now in constant pressure: the set point follows once the poll has read its object again
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), poll);
+  this->reply_(bundle({REPLY_CONTROL_MODE_CP, REPLY_OPERATING_MODE_NORMAL, REPLY_CP_SETPOINT}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
   this->reply_(REPLY_CP_SETPOINT);
   EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);
@@ -165,13 +178,9 @@ TEST_F(NumberTest, NanIsRefused) {
 TEST_F(NumberTest, NoWriteWithoutLimits) {
   this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
-  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);  // the limits are not read yet
-  this->reply_(REPLY_CP_LIMITS_NAN);                  // and the pump reports none
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_CP);
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);                                      // the limits are not read yet
+  this->reply_(bundle({REPLY_CONTROL_MODE_CP, REPLY_CP_LIMITS_NAN, REPLY_CP_SETPOINT}));  // and the pump reports none
   this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);
   EXPECT_TRUE(this->next_request_().empty());
 }
@@ -230,12 +239,10 @@ TEST_F(NumberTest, SetPointWaitsForThePollsAfterReconnect) {
   this->read_constant_pressure_();
   this->bus_.lose_connection();
   this->bus_.establish_connection();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // the poll after connecting is on the wire
-  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);  // the limits are kept, so it is queued
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  // 86/16 first, then the write; no warning for the wait
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_CP_NO_LIMITS);  // the poll after connecting is on the wire
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);         // the limits are kept, so it is queued
+  this->reply_(bundle({REPLY_CONTROL_MODE_CP, REPLY_CP_SETPOINT}));
+  // The poll first, then the write; no warning for the wait
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
   this->reply_(REPLY_CP_SETPOINT);
   EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);
@@ -245,19 +252,15 @@ TEST_F(NumberTest, SetPointWaitsForThePollsAfterReconnect) {
 TEST_F(NumberTest, SetPointWaitsForTheControlMode) {
   this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->run_(TIMEOUT_MS);  // the control mode is not known
-  this->run_(QUIET_MS);
-  ASSERT_EQ(this->bus_.written.back(), FRAME_GET_86_15);
-  this->reply_(REPLY_CP_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_CP);
+  // The control mode is not known: its object comes in another version
+  this->reply_(bundle({REPLY_CONTROL_MODE_V2, REPLY_CP_LIMITS, REPLY_CP_SETPOINT}));
   this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->pump_.status_has_warning());
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_CP_NO_LIMITS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_CP, REPLY_CP_SETPOINT}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);  // the write
   this->reply_(REPLY_CP_SETPOINT);
   EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);

@@ -197,16 +197,24 @@ struct Model {
   bool has_clock;
 };
 
-// Values of current_ besides a step of the poll chain
-static constexpr uint8_t REQUEST_CLOCK = 0xFC;
+// Measured on one ALPHA3 (remote test, 12 Nov 2026): it answers a request of up to 4 class 10 GETs with one reply
+// holding all of them, the largest with 111 bytes of APDUs (LE 0x71), and does not answer 5 to 8 GETs in one request,
+// not even of small objects. A poll request stays within both, as larger replies were never tried.
+static constexpr size_t MAX_POLL_OBJECTS = 4;
+static constexpr size_t MAX_POLL_REPLY = 111;
+
+// Values of current_
+static constexpr uint8_t REQUEST_CLOCK = 0xFB;
+static constexpr uint8_t REQUEST_POLL = 0xFC;  // the steps of the poll chain in batch_
 static constexpr uint8_t REQUEST_WRITE = 0xFD;
 static constexpr uint8_t REQUEST_IDENTITY = 0xFE;
 static constexpr uint8_t REQUEST_NONE = 0xFF;
 static constexpr uint32_t NO_EVENT_SHOWN = 0x10000;
 
 /// A Grundfos ALPHA circulator pump. It reads the pump's unit family, type and version once, then polls the
-/// objects of that model: the measurements first, then the settings its entities show. A write reads the settings
-/// object, checks it against the last poll, changes one value, writes it and reads it back; writes run one at a time.
+/// objects of that model, several in one request: the measurements first, then the settings its entities show. A write
+/// reads the settings object, checks it against the last poll, changes one value, writes it and reads it back; writes
+/// run one at a time, each in requests of their own.
 class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_SENSOR
   SUB_SENSOR(flow)
@@ -287,7 +295,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
  protected:
   bool identify_(const genibus::GenibusResponse &response);
   void decode_(uint8_t index, const genibus::GenibusResponse &response);
-  /// Send the request of the first wanted step from step on: the measurement objects, then the settings.
+  /// Send one request for the next wanted steps from step on, as many as fit MAX_POLL_OBJECTS and MAX_POLL_REPLY:
+  /// the measurement objects, then the settings.
   void request_from_(size_t step);
   bool wants_(const ObjectLayout &layout) const;
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
@@ -300,7 +309,6 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   bool wants_info_(InfoStep step) const;
-  bool request_info_(InfoStep step);
   void decode_info_(InfoStep step, const genibus::GenibusResponse &response);
   /// The class 10 object in a reply with status 0, checked against type, version and size.
   bool parse_event_object_(const genibus::GenibusResponse &response, uint16_t sub_id, uint16_t type, size_t size,
@@ -345,16 +353,20 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
   void publish_(Reading reading, float value);
   void publish_unknown_();
-  bool first_warning_(uint8_t bit);
+  bool first_warning_(uint16_t bit);
 #ifdef USE_SENSOR
   sensor::Sensor *sensor_(Reading reading) const;
 #endif
 
   const Model *model_{nullptr};
-  uint8_t current_{REQUEST_NONE};  // step of the poll chain on the wire, or REQUEST_IDENTITY
-  uint8_t warned_{0};
+  uint8_t current_{REQUEST_NONE};
+  // The steps of the poll chain on the wire, in the order of the request
+  std::array<uint8_t, MAX_POLL_OBJECTS> batch_{};
+  uint8_t batch_size_{0};
+  uint16_t warned_{0};
   uint8_t missing_{0};  // a bit per object index the pump does not have
   bool unsupported_{false};
+  bool single_{false};  // a request of several objects failed: one object per request until the next connection
   bool has_values_{false};
 #ifdef USE_SENSOR
   // The highest value published per counter, from READING_ENERGY to READING_STARTS
