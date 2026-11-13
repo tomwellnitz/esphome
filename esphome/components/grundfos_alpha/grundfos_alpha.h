@@ -246,7 +246,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   /// The pump's clock in 94/101 minus the local time of the time source, in seconds; false when the reply holds no
   /// valid time.
   bool clock_deviation_(const genibus::GenibusResponse &response, int32_t &deviation);
-  void end_clock_(const LogString *failure);
+  /// block_writes: the pump answered a write but the clock is still not right; only checks follow until restart.
+  void end_clock_(const LogString *failure, bool block_writes);
 #endif
   void publish_(Reading reading, float value);
   void publish_unknown_();
@@ -292,6 +293,7 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   std::array<uint8_t, 10> clock_body_{};  // 94/100 as written
   ClockPhase clock_phase_{ClockPhase::CLOCK_PHASE_NONE};
   bool clock_due_{true};  // check at the first update with a valid time after a connection
+  bool clock_write_blocked_{false};
 #endif
 };
 

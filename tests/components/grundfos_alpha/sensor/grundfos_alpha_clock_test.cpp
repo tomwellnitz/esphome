@@ -95,13 +95,85 @@ class ClockTest : public PumpTest {
     return this->next_request_() == FRAME_GET_94_101;
   }
 
+  // Answer the steps of a check that sets the clock, up to the request of the given step: 0 the check, 1 the read of
+  // 94/100, 2 the SET, 3 the read-back, 4 the check after the write
+  void run_to_step_(int step) {
+    this->identify_();
+    ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
+    const Bytes replies[] = {REPLY_ACTUAL_SLOW, REPLY_CONFIG_OLD, REPLY_SET_ACK, REPLY_CONFIG_SET};
+    const Bytes requests[] = {FRAME_GET_94_100, FRAME_SET_CLOCK, FRAME_GET_94_100, FRAME_GET_94_101};
+    for (int i = 0; i < step; i++) {
+      this->reply_(replies[i]);
+      ASSERT_EQ(this->next_request_(), requests[i]);
+    }
+  }
+
+  // After a failure without a valid answer from the pump: nothing more is sent, the next check comes after an hour
+  // and sets the clock again
+  void expect_retry_after_an_hour_() {
+    EXPECT_TRUE(this->next_request_().empty());
+    EXPECT_FALSE(this->pump_.status_has_warning());
+    EXPECT_FALSE(this->checks_after_(HOUR_MS - 1000));
+    ASSERT_TRUE(this->checks_after_(1000));
+    this->reply_(REPLY_ACTUAL_21_48_48);
+    ASSERT_EQ(this->next_request_(), FRAME_GET_94_100);
+    this->reply_(REPLY_CONFIG_OLD);
+    EXPECT_EQ(this->next_request_(), FRAME_SET_CLOCK);
+  }
+
+  // After the pump answered a write but the clock is still off: checks go on, but nothing is written until restart
+  void expect_no_more_writes_() {
+    EXPECT_TRUE(this->next_request_().empty());
+    EXPECT_FALSE(this->pump_.status_has_warning());
+    EXPECT_FALSE(this->checks_after_(HOUR_MS));
+    this->bus_.lose_connection();
+    this->bus_.establish_connection();
+    ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
+    this->reply_(REPLY_ACTUAL_SLOW);
+    EXPECT_FLOAT_EQ(this->deviation_.state, -46.0f);
+    EXPECT_TRUE(this->next_request_().empty());
+    ASSERT_TRUE(this->checks_after_(DAY_MS));
+    this->reply_(REPLY_ACTUAL_SLOW);
+    EXPECT_TRUE(this->next_request_().empty());
+    EXPECT_FALSE(this->wrote_twice_(FRAME_SET_CLOCK));
+  }
+
+  // The reply to the given step comes while the bus has lost the connection, so the next request is not sent
+  void expect_not_sent_(int step) {
+    this->run_to_step_(step);
+    const Bytes replies[] = {REPLY_ACTUAL_SLOW, REPLY_CONFIG_OLD, REPLY_SET_ACK, REPLY_CONFIG_SET};
+    this->bus_.connected = false;
+    this->reply_(replies[step]);
+    this->bus_.connected = true;
+    this->expect_retry_after_an_hour_();
+  }
+
+  void expect_timeout_(int step) {
+    this->run_to_step_(step);
+    this->run_(TIMEOUT_MS + QUIET_MS + 100);
+    this->expect_retry_after_an_hour_();
+  }
+
+  bool wrote_twice_(const Bytes &frame) const {
+    return std::count(this->bus_.written.begin(), this->bus_.written.end(), frame) > 1;
+  }
+
   FakeClock clock_;
   sensor::Sensor deviation_;
 };
 
 TEST_F(ClockTest, SetsASlowClockAfterTheConnection) {
-  this->set_clock_();
+  this->check_until_set_();
   EXPECT_FLOAT_EQ(this->deviation_.state, -46.0f);
+  ASSERT_EQ(this->next_request_(), FRAME_SET_CLOCK);
+  this->reply_(REPLY_SET_ACK);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_94_100);
+  this->reply_(REPLY_CONFIG_SET);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
+  this->reply_(REPLY_ACTUAL_20_48_48);
+  EXPECT_TRUE(this->next_request_().empty());
+  // The sensor shows the clock after the write
+  EXPECT_FLOAT_EQ(this->deviation_.state, 0.0f);
   EXPECT_FALSE(this->pump_.status_has_warning());
 }
 
@@ -160,42 +232,85 @@ TEST_F(ClockTest, ConnectionLostDuringTheCheck) {
   EXPECT_EQ(this->next_request_(), FRAME_GET_94_101);
 }
 
-// A failed write is only logged; the next check comes after an hour
-TEST_F(ClockTest, RefusedWriteIsRetriedAfterAnHour) {
-  this->check_until_set_();
-  ASSERT_EQ(this->next_request_(), FRAME_SET_CLOCK);
+// A failed write is only logged; the pump would refuse the same write again
+TEST_F(ClockTest, FailedWriteIsNotRepeated) {
+  this->run_to_step_(2);
   this->reply_(REPLY_SET_FAILED);
-  EXPECT_TRUE(this->next_request_().empty());
-  EXPECT_FALSE(this->pump_.status_has_warning());
-  EXPECT_FALSE(this->checks_after_(HOUR_MS - 1000));
-  EXPECT_TRUE(this->checks_after_(1000));
+  this->expect_no_more_writes_();
 }
 
-TEST_F(ClockTest, DifferentReadBackFails) {
-  this->check_until_set_();
-  ASSERT_EQ(this->next_request_(), FRAME_SET_CLOCK);
-  this->reply_(REPLY_SET_ACK);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_94_100);
+TEST_F(ClockTest, WriteWithoutStatusIsNotRepeated) {
+  this->run_to_step_(2);
+  this->reply_(REPLY_SET_NO_STATUS);
+  this->expect_no_more_writes_();
+}
+
+// A busy pump may take the write later
+TEST_F(ClockTest, BusyPumpIsRetriedAfterAnHour) {
+  this->run_to_step_(2);
+  this->reply_(REPLY_SET_BUSY);
+  this->expect_retry_after_an_hour_();
+}
+
+TEST_F(ClockTest, DifferentReadBackIsNotRepeated) {
+  this->run_to_step_(3);
+  this->reply_(REPLY_CONFIG_OLD);
+  this->expect_no_more_writes_();
+}
+
+// For example a daylight saving rule in the pump that does not match the time source: writing again would only wear
+// the pump's memory, at each retry and each connection all summer
+TEST_F(ClockTest, ClockStillOffAfterTheWriteIsNotRepeated) {
+  this->run_to_step_(4);
+  this->reply_(REPLY_ACTUAL_21_48_48);
+  EXPECT_FLOAT_EQ(this->deviation_.state, 3600.0f);
+  this->expect_no_more_writes_();
+}
+
+TEST_F(ClockTest, NoValidTimeAfterTheWriteIsRetried) {
+  this->run_to_step_(4);
+  this->reply_(REPLY_OBJECT_MISSING);
+  this->expect_retry_after_an_hour_();
+}
+
+TEST_F(ClockTest, MissingReadBackIsRetried) {
+  this->run_to_step_(3);
+  this->reply_(REPLY_OBJECT_MISSING);
+  this->expect_retry_after_an_hour_();
+}
+
+// The time source loses its time between the check and the write
+TEST_F(ClockTest, TimeSourceLostBeforeTheWrite) {
+  this->run_to_step_(1);
+  this->clock_.now = 0;
   this->reply_(REPLY_CONFIG_OLD);
   EXPECT_TRUE(this->next_request_().empty());
-  EXPECT_FALSE(this->checks_after_(HOUR_MS - 1000));
-  EXPECT_TRUE(this->checks_after_(1000));
+  this->clock_.now = TIME_20_48_48;
+  this->expect_retry_after_an_hour_();
 }
 
-// For example a daylight saving rule in the pump that does not match the time source
-TEST_F(ClockTest, ClockStillOffAfterTheWriteFails) {
-  this->check_until_set_();
-  ASSERT_EQ(this->next_request_(), FRAME_SET_CLOCK);
-  this->reply_(REPLY_SET_ACK);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_94_100);
-  this->reply_(REPLY_CONFIG_SET);
+TEST_F(ClockTest, ReadNotSent) { this->expect_not_sent_(0); }
+TEST_F(ClockTest, WriteNotSent) { this->expect_not_sent_(1); }
+TEST_F(ClockTest, ReadBackNotSent) { this->expect_not_sent_(2); }
+TEST_F(ClockTest, CheckAfterTheWriteNotSent) { this->expect_not_sent_(3); }
+
+TEST_F(ClockTest, TimeoutOfTheRead) { this->expect_timeout_(1); }
+TEST_F(ClockTest, TimeoutOfTheWrite) { this->expect_timeout_(2); }
+TEST_F(ClockTest, TimeoutOfTheReadBack) { this->expect_timeout_(3); }
+TEST_F(ClockTest, TimeoutOfTheCheckAfterTheWrite) { this->expect_timeout_(4); }
+
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+// A command pressed during the check waits for it and then goes first
+TEST_F(ClockTest, CommandWaitsForTheCheck) {
+  this->clock_.now = TIME_20_49_31;
+  this->identify_();
   ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
-  this->reply_(REPLY_ACTUAL_21_48_48);
+  this->pump_.send_command(Command::COMMAND_RESET_ALARM);
   EXPECT_TRUE(this->next_request_().empty());
-  EXPECT_FLOAT_EQ(this->deviation_.state, -46.0f);
-  EXPECT_FALSE(this->checks_after_(HOUR_MS - 1000));
-  EXPECT_TRUE(this->checks_after_(1000));
+  this->reply_(REPLY_ACTUAL_20_49_31);
+  EXPECT_EQ(this->next_request_(), FRAME_COMMAND_2);
 }
+#endif
 
 // Another object in the reply to the check is never taken for the time
 TEST_F(ClockTest, WrongObjectInTheCheckIsNotWritten) {

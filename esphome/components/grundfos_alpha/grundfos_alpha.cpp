@@ -109,9 +109,6 @@ static constexpr uint8_t OFFSET_CONTROL_MODE = 2;  // 0x012F and 0x0154: the req
 // the requested operating mode: the class 3 stop also sets it to Stop (1), and Stop stays after a loss of power.
 static constexpr uint8_t CONTROL_MODES[] = {0, 1, 2, 13, 14, 15};
 static constexpr uint8_t OPERATING_MODES[] = {0, 1, 2, 3};
-// Status byte of a class 10 SET acknowledgement
-static constexpr uint8_t SET_STATUS_BUSY = 2;
-static constexpr uint8_t SET_STATUS_FAILED = 4;
 #endif
 
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
@@ -156,6 +153,12 @@ PROGMEM_STRING_TABLE(ControlSourceNames, "Undefined", "Panel", "Bus", "Link", "E
 #endif
 #endif
 
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) || defined(USE_GRUNDFOS_ALPHA_CLOCK)
+// Status byte of a class 10 SET acknowledgement
+static constexpr uint8_t SET_STATUS_BUSY = 2;
+static constexpr uint8_t SET_STATUS_FAILED = 4;
+#endif
+
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
 // Clock objects of profile 52_1_0, measured on an ALPHA3. 94/100 type 0x0141 v1: sync_enabled, year (u16), month,
 // day, hour, minute, second, 1/100 s, hour_format, in local time; a write sets the clock. 94/101 type 0x0142 v1: the
@@ -172,7 +175,8 @@ static constexpr uint8_t CLOCK_ACTUAL_SIZE = 12;
 static constexpr uint8_t OFFSET_SYNC = 0;         // 94/100
 static constexpr uint8_t OFFSET_HOUR_FORMAT = 9;  // 94/100; 0 is 24 h
 static constexpr uint32_t CLOCK_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
-static constexpr uint32_t CLOCK_RETRY_MS = 60 * 60 * 1000;  // after a failed check or write
+// After a check or write that got no valid answer, or a busy pump
+static constexpr uint32_t CLOCK_RETRY_MS = 60 * 60 * 1000;
 // The time source has whole seconds; a smaller deviation is not worth a write to the pump's memory
 static constexpr int32_t CLOCK_TOLERANCE_S = 2;
 
@@ -943,6 +947,7 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
   int32_t deviation = 0;
   const LogString *failure = nullptr;
   bool done = false;
+  bool block = false;  // the pump answered the write; the same write would only repeat
   switch (this->clock_phase_) {
     case ClockPhase::CLOCK_PHASE_CHECK: {
       if (!this->clock_deviation_(response, deviation)) {
@@ -953,6 +958,11 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
       PUBLISH_STATE(this->clock_deviation_sensor_, static_cast<float>(deviation));
 #endif
       if (std::abs(deviation) < CLOCK_TOLERANCE_S) {
+        done = true;
+        break;
+      }
+      if (this->clock_write_blocked_) {
+        ESP_LOGD(TAG, "Pump clock is %" PRId32 " s off; not set again until restart", deviation);
         done = true;
         break;
       }
@@ -999,10 +1009,24 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
     case ClockPhase::CLOCK_PHASE_WRITE: {
       genibus::ApduReader reader(response.apdus);
       genibus::Apdu apdu{};
-      if (response.error != GenibusError::GENIBUS_ERROR_NONE || !reader.next(apdu) ||
-          apdu.data_class != genibus::CLASS_DATA_OBJECT || apdu.ack != 0 || apdu.data.size() != 1 ||
-          apdu.data[0] != 0) {
-        failure = LOG_STR("write refused");
+      if (response.error != GenibusError::GENIBUS_ERROR_NONE) {
+        failure = LOG_STR("no reply");
+        break;
+      }
+      if (!reader.next(apdu) || apdu.data_class != genibus::CLASS_DATA_OBJECT || apdu.ack != 0 ||
+          apdu.data.size() != 1) {
+        ESP_LOGV(TAG, "Clock write reply: class %u, ACK %u, %u bytes", apdu.data_class, apdu.ack,
+                 static_cast<unsigned>(apdu.data.size()));
+        failure = LOG_STR("refused");
+        block = true;
+        break;
+      }
+      if (apdu.data[0] != 0) {
+        ESP_LOGV(TAG, "Clock write status %u", apdu.data[0]);
+        // A busy pump may take the same write later; any other status refuses it again
+        block = apdu.data[0] != SET_STATUS_BUSY;
+        failure = block ? (apdu.data[0] == SET_STATUS_FAILED ? LOG_STR("operation failed") : LOG_STR("refused"))
+                        : LOG_STR("pump busy");
         break;
       }
       this->clock_phase_ = ClockPhase::CLOCK_PHASE_VERIFY;
@@ -1014,9 +1038,13 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
       return;
     }
     case ClockPhase::CLOCK_PHASE_VERIFY: {
-      if (!parse_clock(response, CLOCK_CONFIG_TYPE, CLOCK_CONFIG_SIZE, object) ||
-          !std::equal(object.body.begin(), object.body.end(), this->clock_body_.begin())) {
+      if (!parse_clock(response, CLOCK_CONFIG_TYPE, CLOCK_CONFIG_SIZE, object)) {
+        failure = LOG_STR("no valid read-back");
+        break;
+      }
+      if (!std::equal(object.body.begin(), object.body.end(), this->clock_body_.begin())) {
         failure = LOG_STR("the read-back differs");
+        block = true;
         break;
       }
       this->clock_phase_ = ClockPhase::CLOCK_PHASE_RECHECK;
@@ -1028,9 +1056,17 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
       return;
     }
     case ClockPhase::CLOCK_PHASE_RECHECK: {
+      if (!this->clock_deviation_(response, deviation)) {
+        failure = LOG_STR("no valid time in 94/101 after the write");
+        break;
+      }
+#ifdef USE_SENSOR
+      PUBLISH_STATE(this->clock_deviation_sensor_, static_cast<float>(deviation));
+#endif
       // For example a daylight saving rule in the pump that does not match the time source
-      if (!this->clock_deviation_(response, deviation) || std::abs(deviation) >= CLOCK_TOLERANCE_S) {
+      if (std::abs(deviation) >= CLOCK_TOLERANCE_S) {
         failure = LOG_STR("the clock did not take the time");
+        block = true;
         break;
       }
       done = true;
@@ -1040,7 +1076,7 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
       return;
   }
   if (done || failure != nullptr)
-    this->end_clock_(failure);
+    this->end_clock_(failure, block);
   // After a failed reply a late answer may still come; the next update() goes on
   if (response.error != GenibusError::GENIBUS_ERROR_NONE || !this->parent_->is_connected())
     return;
@@ -1051,7 +1087,7 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
   this->request_from_(0);
 }
 
-void GrundfosAlpha::end_clock_(const LogString *failure) {
+void GrundfosAlpha::end_clock_(const LogString *failure, bool block_writes) {
   this->clock_phase_ = ClockPhase::CLOCK_PHASE_NONE;
   this->clock_due_ = false;
   this->clock_checked_at_ = App.get_loop_component_start_time();
@@ -1059,7 +1095,14 @@ void GrundfosAlpha::end_clock_(const LogString *failure) {
     ESP_LOGV(TAG, "Pump clock checked");
     return;
   }
-  // Only a log line: the clock does not affect the pumping, and the next check comes in an hour
+  // Only a log line: the clock does not affect the pumping
+  if (block_writes) {
+    // Writing again would wear the pump's memory, for example each hour all summer for an unknown daylight saving
+    // rule; the checks go on
+    this->clock_write_blocked_ = true;
+    ESP_LOGW(TAG, "Setting the pump clock failed: %s; not set again until restart", LOG_STR_ARG(failure));
+    return;
+  }
   ESP_LOGW(TAG, "Setting the pump clock failed: %s", LOG_STR_ARG(failure));
   this->clock_checked_at_ -= CLOCK_CHECK_INTERVAL_MS - CLOCK_RETRY_MS;
 }
