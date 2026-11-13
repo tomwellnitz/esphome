@@ -20,12 +20,14 @@ static constexpr uint8_t IDENTITY_REQUEST[] = {CLASS_MEASURED_DATA, 0x03, 148, 1
 // warned_ holds a bit per object index below these flags
 static constexpr uint8_t WARNED_IDENTITY = 0x80;
 static constexpr uint8_t WARNED_SETTING = 0x40;
-static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING;
+static constexpr uint8_t WARNED_INFO = 0x20;
+static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING | WARNED_INFO;
 
 // Grundfos GO app 8.5.2, unit_factor_mapping.csv: 1 m = 9804.14 Pa. The ALPHA3 factory limits of the constant
 // pressure set point (86/15: 19608, 39216, 58824 Pa) are whole multiples of 9804. The alpha3 component uses 10000.
 static constexpr float PASCAL_PER_METER = 9804.0f;
 static constexpr float SECONDS_PER_HOUR = 3600.0f;
+static constexpr float WATT_SECONDS_PER_KILOWATT_HOUR = 3.6e6f;
 
 // Object layouts and field names from the Grundfos GENI profile in the Grundfos GO app 8.5.2
 // (ALPHA3 Model B: profile 52_1_0, version V01.11.00.00037). The alpha3 component reads the same requests,
@@ -33,22 +35,43 @@ static constexpr float SECONDS_PER_HOUR = 3600.0f;
 // 93/289, type 0x0130 v1: pump_flow (m³/s), pump_differential_pressure (Pa), inlet_pressure, outlet_pressure,
 // media_temperature, differential_temperature
 static constexpr Field ALPHA3_PROCESS_FIELDS[] = {
-    {Reading::READING_FLOW, 0, SECONDS_PER_HOUR},
-    {Reading::READING_HEAD, 4, 1.0f / PASCAL_PER_METER},
-    {Reading::READING_MEDIUM_TEMPERATURE, 16, 1.0f},  // °C, unlike the SI units of the other fields
+    {Reading::READING_FLOW, 0, FieldFormat::FIELD_FORMAT_FLOAT, SECONDS_PER_HOUR},
+    {Reading::READING_HEAD, 4, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f / PASCAL_PER_METER},
+    // °C, unlike the SI units of the other fields
+    {Reading::READING_MEDIUM_TEMPERATURE, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
 // 87/69, type 0x0100 v1: grid_voltage, dc_link_voltage, current, power_consumption, dc_power_consumption,
 // absolute_speed (rpm), three temperatures, pwm_type
 static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
-    {Reading::READING_VOLTAGE, 0, 1.0f},
-    {Reading::READING_CURRENT, 8, 1.0f},
+    {Reading::READING_VOLTAGE, 0, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+    {Reading::READING_CURRENT, 8, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
     // dc_power_consumption: the app shows it as the power (widget_configuration_52_1_0.xml); alpha3 reads offset 12
-    {Reading::READING_POWER, 16, 1.0f},
-    {Reading::READING_SPEED, 20, 1.0f},
+    {Reading::READING_POWER, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+    {Reading::READING_SPEED, 20, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
+};
+// 87/1, type 0x00E8 v1: system_energy (double, Ws), system_power, then a counted list of one entry per pump.
+// Whether system_energy also falls back after a power cut is not known yet; it is held like 93/1 (see publish_).
+static constexpr Field ALPHA3_ENERGY_FIELDS[] = {
+    {Reading::READING_ENERGY, 0, FieldFormat::FIELD_FORMAT_DOUBLE, 1.0f / WATT_SECONDS_PER_KILOWATT_HOUR},
+};
+// 93/1, type 0x00F8 v2: starts (u32), starts_last_hour (u16), starts_last24hrs (u16), operating_time (u32, s, total),
+// operating_time_last_24hrs, last_operating_time, power_up_counter, power_on_time. The pump stores starts and
+// operating_time only now and then: after a power cut a real ALPHA3 reported one start and 3637 s less than before.
+static constexpr Field ALPHA3_HISTORY_FIELDS[] = {
+    {Reading::READING_OPERATING_HOURS, 8, FieldFormat::FIELD_FORMAT_UINT32, 1.0f / SECONDS_PER_HOUR},
+    {Reading::READING_STARTS, 0, FieldFormat::FIELD_FORMAT_UINT32, 1.0f},
+};
+// 88/25, type 0x010A v1: warn_code, alarm_code, highest_prioritized_error_code (u16 each, 0 = no fault)
+static constexpr Field ALPHA3_FAULT_FIELDS[] = {
+    {Reading::READING_WARNING_CODE, 0, FieldFormat::FIELD_FORMAT_UINT16, 1.0f},
+    {Reading::READING_ALARM_CODE, 2, FieldFormat::FIELD_FORMAT_UINT16, 1.0f},
 };
 static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
-    {93, 289, 0x0130, 1, 24, ALPHA3_PROCESS_FIELDS},
-    {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},
+    {93, 289, 0x0130, 1, 24, ALPHA3_PROCESS_FIELDS},  // process values
+    {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},     // motor values
+    {87, 1, 0x00E8, 1, 26, ALPHA3_ENERGY_FIELDS},     // energy; 26 bytes: one pump in the list
+    {93, 1, 0x00F8, 2, 28, ALPHA3_HISTORY_FIELDS},    // operation history
+    {88, 25, 0x010A, 1, 6, ALPHA3_FAULT_FIELDS},      // fault status
 };
 
 // Settings objects of profile 52_1_0, in the order of Setting (Grundfos GO app data; the types, versions and sizes
@@ -73,7 +96,7 @@ static constexpr SettingLayouts ALPHA3_SETTINGS = {{
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
 // Add a model only after it was tested on a real pump
 static constexpr Model MODELS[] = {
-    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS},
+    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS, true},
 };
 
 // missing_ and warned_ keep a bit per object index
@@ -87,6 +110,28 @@ static constexpr bool objects_fit_bits() {
 static_assert(objects_fit_bits(), "A model has more objects than missing_ and warned_ have bits");
 
 static float read_float(const uint8_t *at) { return bit_cast<float>(encode_uint32(at[0], at[1], at[2], at[3])); }
+
+/// The field in body, or NAN when the body is too short for it.
+static float read_field(const Field &field, std::span<const uint8_t> body) {
+  static constexpr uint8_t SIZES[] = {4, 8, 2, 4};
+  if (field.offset + SIZES[static_cast<size_t>(field.format)] > body.size())
+    return NAN;
+  const uint8_t *at = &body[field.offset];
+  switch (field.format) {
+    case FieldFormat::FIELD_FORMAT_DOUBLE: {
+      const uint64_t bits = (static_cast<uint64_t>(encode_uint32(at[0], at[1], at[2], at[3])) << 32) |
+                            encode_uint32(at[4], at[5], at[6], at[7]);
+      return static_cast<float>(bit_cast<double>(bits));
+    }
+    case FieldFormat::FIELD_FORMAT_UINT16:
+      return encode_uint16(at[0], at[1]);
+    case FieldFormat::FIELD_FORMAT_UINT32:
+      return static_cast<float>(encode_uint32(at[0], at[1], at[2], at[3]));
+    case FieldFormat::FIELD_FORMAT_FLOAT:
+      break;
+  }
+  return read_float(at);
+}
 
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
 #if defined(USE_TEXT_SENSOR) || defined(USE_GRUNDFOS_ALPHA_WRITE)
@@ -156,6 +201,47 @@ static constexpr uint8_t CONTROL_SOURCES[] = {0, 1, 2, 3, 4, 5, 101, 104, 111};
 PROGMEM_STRING_TABLE(ControlSourceNames, "Undefined", "Panel", "Bus", "Link", "External input", "Off button",
                      "Clock program", "Automatic night setback", "Air venting", "Unknown");
 #endif
+
+#ifdef USE_TEXT_SENSOR
+// Class 7 IDs of product_name, device_prod_no, sw_ver_str and ble_sw_ver_str, in the order of InfoStep
+static constexpr uint8_t TEXT_IDS[] = {1, 8, 50, 58};
+static_assert(std::size(TEXT_IDS) == TEXT_COUNT);
+
+// A class 7 reply carries no ID, so a reply to an earlier text that comes late would pass for the text asked for. A
+// real ALPHA3 sent "ALPHA3 25-60 180", "99371929", "99365052V01.00.06.00429" and "99365068V03.00.06.00001": the name
+// starts with a letter, the product number has only digits and a version has digits before a V. The two versions
+// cannot be told apart.
+static bool is_plausible_text(InfoStep step, std::span<const uint8_t> text) {
+  const auto is_digit = [](uint8_t c) { return c >= '0' && c <= '9'; };
+  const auto digits = std::find_if_not(text.begin(), text.end(), is_digit);
+  switch (step) {
+    case InfoStep::INFO_STEP_PRODUCT_NAME:
+      return !text.empty() && ((text[0] >= 'A' && text[0] <= 'Z') || (text[0] >= 'a' && text[0] <= 'z'));
+    case InfoStep::INFO_STEP_PRODUCT_NUMBER:
+      return !text.empty() && digits == text.end();
+    default:
+      return digits != text.begin() && digits != text.end() && *digits == 'V';
+  }
+}
+
+static constexpr uint8_t DIAGNOSTICS_OBJECT = 88;
+// 88/10199 EventLogInfo, type 0x00F3 v1: u16 latest_event_id, u16 current_entries, u16 log_size, bool extended_info
+static constexpr uint16_t EVENT_LOG_SUB_ID = 10199;
+static constexpr uint16_t EVENT_LOG_TYPE = 0x00F3;
+static constexpr size_t EVENT_LOG_SIZE = 7;
+// 88/10200 + n EventLogEntry, type 0x00F4 v1: u16 event_id, u16 event_code, u8 source, u8 related_no, u8 event_type,
+// u32 Unix time. A real ALPHA3 held events 1 to 6 in 88/10200 to 88/10205 of a log of 40; that the log wraps around
+// after log_size entries is assumed.
+static constexpr uint16_t FIRST_EVENT_SUB_ID = 10200;
+static constexpr uint16_t EVENT_TYPE = 0x00F4;
+static constexpr size_t EVENT_SIZE = 11;
+static constexpr uint8_t OFFSET_EVENT_TYPE = 6;
+// Enum EventType of the Grundfos GO app profile 52_1_0 at its index (1 AlarmAppeared, 2 AlarmDisappered,
+// 3 WarningAppeared, 4 WarningDisappered), not confirmed on a pump beyond a real ALPHA3 logging dry running (code 57)
+// with type 1, then 2. The first name is the fallback, the last is an empty log.
+PROGMEM_STRING_TABLE(EventNames, "Event", "Alarm appeared", "Alarm cleared", "Warning appeared", "Warning cleared",
+                     "No events");
+#endif
 #endif
 
 void GrundfosAlpha::dump_config() {
@@ -169,10 +255,20 @@ void GrundfosAlpha::dump_config() {
   LOG_SENSOR("  ", "Current", this->current_sensor_);
   LOG_SENSOR("  ", "Power", this->power_sensor_);
   LOG_SENSOR("  ", "Speed", this->speed_sensor_);
+  LOG_SENSOR("  ", "Energy", this->energy_sensor_);
+  LOG_SENSOR("  ", "Operating hours", this->operating_hours_sensor_);
+  LOG_SENSOR("  ", "Starts", this->starts_sensor_);
+  LOG_SENSOR("  ", "Warning code", this->warning_code_sensor_);
+  LOG_SENSOR("  ", "Alarm code", this->alarm_code_sensor_);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   LOG_TEXT_SENSOR("  ", "Operating mode", this->operating_mode_text_sensor_);
   LOG_TEXT_SENSOR("  ", "Control source", this->control_source_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Product name", this->product_name_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Product number", this->product_number_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Software version", this->software_version_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Bluetooth software version", this->bluetooth_software_version_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Last event", this->last_event_text_sensor_);
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SELECT)
   LOG_SELECT("  ", "Control mode", this->selects_[0]);
@@ -247,11 +343,16 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   if (this->model_ == nullptr)
     return;
   const size_t objects = this->model_->objects.size();
+  const size_t info = objects + static_cast<size_t>(Setting::SETTING_COUNT);
   if (current < objects) {
     this->decode_(current, response);
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
-  } else if (this->model_->settings != nullptr && current < objects + static_cast<size_t>(Setting::SETTING_COUNT)) {
+  } else if (this->model_->settings != nullptr && current < info) {
     this->decode_setting_(static_cast<Setting>(current - objects), response);
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  } else if (current >= info && current < info + static_cast<size_t>(InfoStep::INFO_STEP_COUNT)) {
+    this->decode_info_(static_cast<InfoStep>(current - info), response);
 #endif
   } else {
     return;
@@ -264,14 +365,28 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   this->request_from_(current + 1);
 }
 
+void GrundfosAlpha::on_connected() {
+  this->missing_ = 0;
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  this->texts_read_ = 0;
+  this->texts_retried_ = 0;
+  this->event_wanted_ = 0;
+  this->event_log_missing_ = false;
+#endif
+  this->update();
+}
+
 void GrundfosAlpha::on_disconnected() {
   this->publish_unknown_();
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
-  // Empty, as ble_client text sensors show a lost connection
-  for (auto *text_sensor : {this->operating_mode_text_sensor_, this->control_source_text_sensor_}) {
+  // Empty, as ble_client text sensors show a lost connection. The product texts stay: they are read again after the
+  // pump comes back, which happens several times a day when the heating cuts its power.
+  for (auto *text_sensor :
+       {this->operating_mode_text_sensor_, this->control_source_text_sensor_, this->last_event_text_sensor_}) {
     if (text_sensor != nullptr && text_sensor->has_state())
       text_sensor->publish_state("");
   }
+  this->event_shown_ = NO_EVENT_SHOWN;
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   if (this->phase_ != JobPhase::JOB_PHASE_NONE)
@@ -343,12 +458,8 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
              layout.sub_id, apdu.data_class, apdu.ack, object.type, object.version,
              static_cast<unsigned>(object.body.size()));
   }
-  for (const auto &field : layout.fields) {
-    float value = NAN;
-    if (ok && field.offset + 4u <= object.body.size())
-      value = read_float(&object.body[field.offset]) * field.factor;
-    this->publish_(field.reading, value);
-  }
+  for (const auto &field : layout.fields)
+    this->publish_(field.reading, ok ? read_field(field, object.body) * field.factor : NAN);
   if (ok)
     this->has_values_ = true;
 }
@@ -364,16 +475,27 @@ void GrundfosAlpha::request_from_(size_t step) {
     return;
   }
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
-  if (this->model_->settings == nullptr)
-    return;
-  for (size_t i = step - objects.size(); i < static_cast<size_t>(Setting::SETTING_COUNT); i++) {
-    if (!this->wants_setting_(static_cast<Setting>(i)))
+  if (this->model_->settings != nullptr) {
+    for (size_t i = step - objects.size(); i < static_cast<size_t>(Setting::SETTING_COUNT); i++) {
+      if (!this->wants_setting_(static_cast<Setting>(i)))
+        continue;
+      const SettingLayout &layout = (*this->model_->settings)[i];
+      if (this->request_object_(layout.object, layout.sub_id))
+        this->current_ = static_cast<uint8_t>(objects.size() + i);
+      return;
+    }
+  }
+#ifdef USE_TEXT_SENSOR
+  const size_t info = objects.size() + static_cast<size_t>(Setting::SETTING_COUNT);
+  for (size_t i = std::max(step, info) - info; i < static_cast<size_t>(InfoStep::INFO_STEP_COUNT); i++) {
+    const auto info_step = static_cast<InfoStep>(i);
+    if (!this->wants_info_(info_step))
       continue;
-    const SettingLayout &layout = (*this->model_->settings)[i];
-    if (this->request_object_(layout.object, layout.sub_id))
-      this->current_ = static_cast<uint8_t>(objects.size() + i);
+    if (this->request_info_(info_step))
+      this->current_ = static_cast<uint8_t>(info + i);
     return;
   }
+#endif
 #endif
 }
 
@@ -389,6 +511,14 @@ bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
 
 void GrundfosAlpha::publish_(Reading reading, float value) {
 #ifdef USE_SENSOR
+  // A counter that falls back after a power cut keeps its highest value until it passes it again, so that
+  // total_increasing sensors do not go down. A restart of the ESP forgets the highest values.
+  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_ENERGY);
+  if (total < this->totals_.size() && !std::isnan(value)) {
+    if (value < this->totals_[total])
+      value = this->totals_[total];
+    this->totals_[total] = value;
+  }
   PUBLISH_STATE(this->sensor_(reading), value);
 #endif
 }
@@ -410,6 +540,16 @@ sensor::Sensor *GrundfosAlpha::sensor_(Reading reading) const {
       return this->power_sensor_;
     case Reading::READING_SPEED:
       return this->speed_sensor_;
+    case Reading::READING_ENERGY:
+      return this->energy_sensor_;
+    case Reading::READING_OPERATING_HOURS:
+      return this->operating_hours_sensor_;
+    case Reading::READING_STARTS:
+      return this->starts_sensor_;
+    case Reading::READING_WARNING_CODE:
+      return this->warning_code_sensor_;
+    case Reading::READING_ALARM_CODE:
+      return this->alarm_code_sensor_;
   }
   return nullptr;
 }
@@ -533,6 +673,160 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
     }
   }
 #endif
+}
+#endif
+
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+text_sensor::TextSensor *GrundfosAlpha::text_sensor_(InfoStep step) const {
+  switch (step) {
+    case InfoStep::INFO_STEP_PRODUCT_NAME:
+      return this->product_name_text_sensor_;
+    case InfoStep::INFO_STEP_PRODUCT_NUMBER:
+      return this->product_number_text_sensor_;
+    case InfoStep::INFO_STEP_SOFTWARE_VERSION:
+      return this->software_version_text_sensor_;
+    case InfoStep::INFO_STEP_BLUETOOTH_SOFTWARE_VERSION:
+      return this->bluetooth_software_version_text_sensor_;
+    default:
+      return this->last_event_text_sensor_;
+  }
+}
+
+bool GrundfosAlpha::wants_info_(InfoStep step) const {
+  if (!this->model_->info || this->text_sensor_(step) == nullptr)
+    return false;
+  const size_t i = static_cast<size_t>(step);
+  if (i < TEXT_COUNT)
+    return (this->texts_read_ & (1u << i)) == 0;
+  if (step == InfoStep::INFO_STEP_EVENT_LOG)
+    return !this->event_log_missing_;
+  return this->event_wanted_ != 0;
+}
+
+bool GrundfosAlpha::request_info_(InfoStep step) {
+  const size_t i = static_cast<size_t>(step);
+  if (i < TEXT_COUNT)
+    return this->request_text_(TEXT_IDS[i]);
+  if (step == InfoStep::INFO_STEP_EVENT_LOG)
+    return this->request_object_(DIAGNOSTICS_OBJECT, EVENT_LOG_SUB_ID);
+  return this->request_object_(DIAGNOSTICS_OBJECT, this->event_sub_id_);
+}
+
+void GrundfosAlpha::decode_info_(InfoStep step, const genibus::GenibusResponse &response) {
+  if (step == InfoStep::INFO_STEP_EVENT_LOG) {
+    this->decode_event_log_(response);
+    return;
+  }
+  if (step == InfoStep::INFO_STEP_EVENT) {
+    this->decode_event_(response);
+    return;
+  }
+  // The bus has logged a timeout or a broken frame; read again at the next update
+  if (response.error != GenibusError::GENIBUS_ERROR_NONE)
+    return;
+  const uint8_t bit = 1u << static_cast<size_t>(step);
+  genibus::ApduReader reader(response.apdus);
+  genibus::Apdu apdu{};
+  std::span<const uint8_t> text;
+  const bool replied = reader.next(apdu);
+  if (replied && genibus::parse_text(apdu, text) && is_plausible_text(step, text)) {
+    PUBLISH_STATE(this->text_sensor_(step), reinterpret_cast<const char *>(text.data()), text.size());
+    this->texts_read_ |= bit;
+    return;
+  }
+  if (this->first_warning_(WARNED_INFO)) {
+    ESP_LOGW(TAG, "Unexpected reply to text %u: class %u, ACK %u, %u bytes", TEXT_IDS[static_cast<size_t>(step)],
+             apdu.data_class, apdu.ack, static_cast<unsigned>(apdu.data.size()));
+  }
+  // A text the pump refuses (an ACK) or sends in another form is not asked for again until the next connection. A
+  // reply of another class or an implausible text may be a late reply to an earlier request: asked for once more.
+  const bool late = !replied || apdu.data_class != genibus::CLASS_ASCII || (apdu.ack == 0 && !text.empty());
+  if (!late || (this->texts_retried_ & bit) != 0)
+    this->texts_read_ |= bit;
+  this->texts_retried_ |= bit;
+}
+
+void GrundfosAlpha::clear_last_event_() {
+  auto *sensor = this->last_event_text_sensor_;
+  if (sensor->has_state() && !sensor->state.empty())
+    sensor->publish_state("");
+}
+
+bool GrundfosAlpha::parse_event_object_(const genibus::GenibusResponse &response, uint16_t sub_id, uint16_t type,
+                                        size_t size, genibus::DataObject &object) {
+  if (response.error != GenibusError::GENIBUS_ERROR_NONE)
+    return false;
+  genibus::ApduReader reader(response.apdus);
+  genibus::Apdu apdu{};
+  const bool replied = reader.next(apdu);
+  if (replied && genibus::parse_data_object(apdu, object) && object.status == 0 && object.type == type &&
+      object.version == 1 && object.body.size() == size)
+    return true;
+  if (replied && genibus::is_object_missing(apdu)) {
+    // Not asked for again until the next connection
+    this->event_log_missing_ = true;
+    ESP_LOGW(TAG, "The pump has no object 88/%u; the last event stays unknown", sub_id);
+  } else if (this->first_warning_(WARNED_INFO)) {
+    ESP_LOGW(TAG, "Unexpected reply to object 88/%u: class %u, ACK %u, status %u, type 0x%04X v%u, %u bytes", sub_id,
+             apdu.data_class, apdu.ack, object.status, object.type, object.version,
+             static_cast<unsigned>(object.body.size()));
+  }
+  return false;
+}
+
+void GrundfosAlpha::decode_event_log_(const genibus::GenibusResponse &response) {
+  genibus::DataObject object{};
+  if (!this->parse_event_object_(response, EVENT_LOG_SUB_ID, EVENT_LOG_TYPE, EVENT_LOG_SIZE, object))
+    return;
+  const auto &body = object.body;
+  const uint16_t latest = encode_uint16(body[0], body[1]);
+  const uint16_t entries = encode_uint16(body[2], body[3]);
+  const uint16_t log_size = encode_uint16(body[4], body[5]);
+  if (latest == 0 || entries == 0) {
+    if (this->event_shown_ != 0) {
+      this->last_event_text_sensor_->publish_state(EventNames::get_progmem_str(EventNames::LAST_INDEX, 0));
+      this->event_shown_ = 0;
+    }
+    return;
+  }
+  if (log_size == 0 || log_size > UINT16_MAX - FIRST_EVENT_SUB_ID) {
+    if (this->first_warning_(WARNED_INFO)) {
+      ESP_LOGW(TAG, "Event log of %u entries not read", log_size);
+    }
+    this->clear_last_event_();
+    this->event_shown_ = NO_EVENT_SHOWN;
+    return;
+  }
+  if (latest == this->event_shown_)
+    return;
+  this->event_wanted_ = latest;
+  this->event_sub_id_ = FIRST_EVENT_SUB_ID + (latest - 1) % log_size;
+}
+
+void GrundfosAlpha::decode_event_(const genibus::GenibusResponse &response) {
+  const uint16_t wanted = this->event_wanted_;
+  this->event_wanted_ = 0;
+  genibus::DataObject object{};
+  // On failure the next update reads the log and the entry again
+  if (!this->parse_event_object_(response, this->event_sub_id_, EVENT_TYPE, EVENT_SIZE, object))
+    return;
+  const auto &body = object.body;
+  const uint16_t id = encode_uint16(body[0], body[1]);
+  // Shown or not, the entry is read again only when the log names another event
+  this->event_shown_ = wanted;
+  if (id != wanted) {
+    if (this->first_warning_(WARNED_INFO)) {
+      ESP_LOGW(TAG, "Object 88/%u holds event %u, not the latest event %u", this->event_sub_id_, id, wanted);
+    }
+    this->clear_last_event_();
+    return;
+  }
+  const uint8_t type = body[OFFSET_EVENT_TYPE];
+  char text[EventNames::MAX_LENGTH + sizeof(" (code 65535)")];
+  ESPHOME_snprintf_P(text, sizeof(text), ESPHOME_PSTR("%s (code %u)"),
+                     LOG_STR_ARG(EventNames::get_log_str(type < EventNames::LAST_INDEX ? type : 0, 0)),
+                     encode_uint16(body[2], body[3]));
+  this->last_event_text_sensor_->publish_state(text);
 }
 #endif
 

@@ -18,6 +18,7 @@ static constexpr size_t MIN_FRAME_SIZE = FRAME_OVERHEAD + 2;
 static constexpr size_t MAX_FRAME_SIZE = FRAME_OVERHEAD + 255;
 
 static constexpr uint8_t CLASS_COMMAND = 3;
+static constexpr uint8_t CLASS_ASCII = 7;
 static constexpr uint8_t CLASS_DATA_OBJECT = 10;
 
 // Operation in bits 7-6 of the second APDU byte of a request; bits 5-0 hold the data length
@@ -53,6 +54,8 @@ uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t 
 /// Write a class 3 SET APDU of one command (3 bytes) and return the pointer past it. Any command ID is accepted;
 /// the device component decides which commands it offers.
 uint8_t *put_command(uint8_t *dst, uint8_t command);
+/// Write a class 7 GET APDU of one text (3 bytes) and return the pointer past it.
+uint8_t *put_get_text(uint8_t *dst, uint8_t id);
 
 /// One APDU; data points into the frame.
 struct Apdu {
@@ -83,6 +86,10 @@ struct DataObject {
 
 /// Parse a class 10 reply APDU with ACK 0 whose size field matches its body.
 bool parse_data_object(const Apdu &apdu, DataObject &object);
+
+/// The text of a class 7 reply APDU with ACK 0: printable ASCII ended by a single 0, which text leaves out. An ALPHA3
+/// answers ID 1 with "ALPHA3 25-60 180" and its 0. False for any other APDU.
+bool parse_text(const Apdu &apdu, std::span<const uint8_t> &text);
 
 /// Whether a class 10 reply to a GET says the device does not have the object. An ALPHA3 answers with ACK 0 and the
 /// single data byte 4 (24 05 F8 E7 0A 01 04 EE 26); the 2005 specification has ACK 2 for an unknown ID. Use it only on
