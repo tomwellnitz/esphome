@@ -92,6 +92,8 @@ enum class JobPhase : uint8_t {
 static constexpr size_t MAX_WRITE_SIZE = 18;
 // Writes that wait while one runs
 static constexpr size_t WRITE_QUEUE_SIZE = 4;
+// Updates a waiting write may wait for a valid read of its object before it is dropped
+static constexpr uint8_t WRITE_WAIT_CYCLES = 3;
 
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
@@ -176,6 +178,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   /// Queue a write; a waiting write of the same setting is replaced. Returns false when it is refused.
   bool enqueue_(const WriteRequest &request, const LogString *what);
+  /// Drop the first waiting write when its object had no valid read for WRITE_WAIT_CYCLES updates.
+  void drop_stuck_write_();
   /// Start the next waiting write; false when none was started.
   bool start_job_();
   /// Whether the objects a write depends on were polled since the connection came up and since the last write.
@@ -227,6 +231,7 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   uint8_t job_version_{0};
   uint8_t job_size_{0};
   uint8_t queued_{0};
+  uint8_t waited_{0};  // updates the first waiting write has not been ready
   JobPhase phase_{JobPhase::JOB_PHASE_NONE};
   bool reply_failed_{false};  // the last reply was an error, so a late answer may still come
   // The status warning is a failed write; it clears at the first valid settings read of a later poll cycle

@@ -30,6 +30,18 @@ const Bytes REPLY_ID_UNKNOWN = {0x24, 0x05, 0xF8, 0xE7, 0x02, 0x81, 0x51, 0x56, 
 const Bytes REPLY_APDU_TOO_LONG = {0x24, 0x05, 0xF8, 0xE7, 0x0A, 0x03, 0x00, 0xC8, 0xC0};
 const Bytes REPLY_EMPTY = {0x24, 0x02, 0xF8, 0xE7, 0x4A, 0xA2};
 const Bytes REPLY_OTHER_NODE = {0x24, 0x05, 0xF8, 0x20, 0x0A, 0x01, 0x00, 0x4C, 0x2B};
+// Recorded on a real ALPHA3: a GET of 93/289, 87/69, 86/8 and 86/10 in one request, and the reply with all four
+const ObjectId FOUR_OBJECTS[] = {{93, 289}, {87, 69}, {86, 8}, {86, 10}};
+const Bytes FRAME_FOUR_OBJECTS = {0x27, 0x16, 0xE7, 0xF8, 0x0A, 0x03, 0x5D, 0x01, 0x21, 0x0A, 0x03, 0x57, 0x00,
+                                  0x45, 0x0A, 0x03, 0x56, 0x00, 0x08, 0x0A, 0x03, 0x56, 0x00, 0x0A, 0x53, 0x37};
+const Bytes REPLY_FOUR_OBJECTS = {
+    0x24, 0x71, 0xF8, 0xE7, 0x0A, 0x1F, 0x00, 0x01, 0x30, 0x01, 0x00, 0x00, 0x18, 0x39, 0x15, 0xD0, 0x93,
+    0x46, 0x36, 0xD2, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x42, 0x2B, 0x77, 0xAA, 0x7F,
+    0xFF, 0xFF, 0xFF, 0x0A, 0x2C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x25, 0x43, 0x5D, 0xDE, 0x5A, 0x43,
+    0x9B, 0xFD, 0x00, 0x3D, 0x0B, 0xE9, 0x99, 0x40, 0xBB, 0x44, 0x00, 0x40, 0xB7, 0xE4, 0xC0, 0x45, 0x13,
+    0x14, 0x58, 0xFF, 0xC0, 0x00, 0x00, 0x42, 0x44, 0x00, 0x00, 0x42, 0x0C, 0x00, 0x00, 0x00, 0x0A, 0x0E,
+    0x00, 0x01, 0x2F, 0x01, 0x00, 0x00, 0x07, 0x01, 0x00, 0x0F, 0x46, 0x37, 0x73, 0x6E, 0x0A, 0x0E, 0x00,
+    0x01, 0x2F, 0x01, 0x00, 0x00, 0x07, 0x00, 0x06, 0x0F, 0x7F, 0xFF, 0xFF, 0xFF, 0x10, 0x21};
 
 constexpr uint32_t TIMEOUT_MS = 1000;
 constexpr uint32_t QUIET_MS = 250;
@@ -82,6 +94,7 @@ class TestDevice : public GenibusDevice {
     this->sent_on_disconnect = this->request_flow_head();
   }
   bool request_flow_head() { return this->request_object_(93, 289); }
+  bool request_objects(std::span<const ObjectId> objects) { return this->request_objects_(objects); }
   bool set(std::span<const uint8_t> body) { return this->set_object_(86, 100, 0x0154, 1, body); }
   bool command(uint8_t id) { return this->send_command_(id); }
 
@@ -489,6 +502,56 @@ TEST_F(GenibusBusTest, SetBodyMustFitOneRequest) {
   this->run_();
   ASSERT_EQ(this->bus_.written.size(), 1u);
   EXPECT_EQ(this->bus_.written[0].size(), MAX_REQUEST_SIZE + FRAME_OVERHEAD + 2);
+}
+
+TEST_F(GenibusBusTest, SendsFourObjectsInOneRequest) {
+  ASSERT_TRUE(this->pump_.request_objects(FOUR_OBJECTS));
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0], FRAME_FOUR_OBJECTS);
+  this->receive_(REPLY_FOUR_OBJECTS);
+  ASSERT_EQ(this->pump_.responses.size(), 1u);
+  const Bytes &apdus = this->pump_.responses[0].apdus;
+  EXPECT_EQ(apdus, Bytes(REPLY_FOUR_OBJECTS.begin() + 4, REPLY_FOUR_OBJECTS.end() - 2));
+  // Each APDU in the order of the request; the reply does not name the objects
+  const GenibusResponse response{GenibusError::GENIBUS_ERROR_NONE, apdus};
+  const uint16_t types[] = {0x0130, 0x0100, 0x012F, 0x012F};
+  const size_t sizes[] = {24, 37, 7, 7};
+  size_t at = 0;
+  for (size_t i = 0; i < 4; i++) {
+    const GenibusResponse part = response.part(i);
+    EXPECT_EQ(part.error, GenibusError::GENIBUS_ERROR_NONE);
+    ASSERT_EQ(part.apdus.data(), apdus.data() + at);
+    at += part.apdus.size();
+    ApduReader reader(part.apdus);
+    Apdu apdu{};
+    DataObject object{};
+    ASSERT_TRUE(reader.next(apdu));
+    EXPECT_TRUE(reader.at_end());
+    ASSERT_TRUE(parse_data_object(apdu, object));
+    EXPECT_EQ(object.type, types[i]);
+    EXPECT_EQ(object.body.size(), sizes[i]);
+  }
+  EXPECT_EQ(at, apdus.size());
+  EXPECT_TRUE(response.part(4).apdus.empty());
+  EXPECT_EQ(response.part(4).error, GenibusError::GENIBUS_ERROR_NONE);
+}
+
+TEST_F(GenibusBusTest, ResponsePartKeepsTheError) {
+  const GenibusResponse response{GenibusError::GENIBUS_ERROR_TIMEOUT, {}};
+  EXPECT_EQ(response.part(0).error, GenibusError::GENIBUS_ERROR_TIMEOUT);
+  EXPECT_TRUE(response.part(0).apdus.empty());
+}
+
+TEST_F(GenibusBusTest, ObjectGetsMustFitOneRequest) {
+  const ObjectId objects[] = {{93, 289}, {87, 69}, {86, 8}, {86, 10}, {86, 100}, {86, 15}, {86, 16}};
+  EXPECT_FALSE(this->pump_.request_objects({}));
+  EXPECT_FALSE(this->pump_.request_objects({objects, MAX_GET_OBJECTS + 1}));
+  EXPECT_FALSE(this->bus_.is_busy(&this->pump_));
+  EXPECT_TRUE(this->pump_.request_objects({objects, MAX_GET_OBJECTS}));
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0].size(), MAX_GET_OBJECTS * GET_OBJECT_SIZE + FRAME_OVERHEAD + 2);
 }
 
 TEST_F(GenibusBusTest, RefusesBadRequests) {
