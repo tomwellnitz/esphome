@@ -1,5 +1,7 @@
 #include "select_fixture.h"
 
+#include <utility>
+
 #include "esphome/components/text_sensor/text_sensor.h"
 
 namespace esphome::grundfos_alpha::testing {
@@ -137,8 +139,40 @@ TEST_F(SelectTest, UnexpectedVersionIsNotWritten) {
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_V2);
   EXPECT_TRUE(this->pump_.status_has_warning());
-  EXPECT_EQ(this->next_request_(), FRAME_GET_SELECTS);  // the refresh
+  // Maybe a late reply to another request: the refresh waits for the next update
+  EXPECT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_GET_SELECTS);
   EXPECT_FALSE(this->wrote_(FRAME_SET_CONTROL_MODE_CURVE));
+}
+
+// A reply to the read of a write must have exactly one APDU, even when its first one would fit
+TEST_F(SelectTest, ReadOfAWriteWithMoreApdusIsNotWritten) {
+  this->read_selects_();
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
+  EXPECT_TRUE(this->pump_.status_has_warning());
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->wrote_(FRAME_SET_CONTROL_MODE_CURVE));
+}
+
+// A poll reply with the right APDU count but another object in it may be the late answer to another request: a waiting
+// write starts only after the next clean reply
+TEST_F(SelectTest, WriteWaitsAfterAPollReplyOfOtherObjects) {
+  this->use_all_();
+  this->identify_();
+  this->read_all_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_RECORDED_POLL);
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  this->reply_(bundle({REPLY_MOTOR, REPLY_PROCESS, REPLY_REALIZED, REPLY_CONTROL_MODE_UNDERFLOOR}));
+  EXPECT_TRUE(std::isnan(this->flow_.state));
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // now the write
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  EXPECT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);
 }
 
 // 86/8 and 86/10 have the same type, version and size: a late 86/8 reply taken for the read must not be written back
@@ -236,10 +270,21 @@ TEST_F(SelectTest, ReplyAfterTheQuietPeriodIsRefusedByItsApduCount) {
   EXPECT_FALSE(this->control_mode_.has_state());
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->bus_.status_has_warning());
+  // After the timeout the objects go one per request until the next connection
   this->pump_.update();
-  this->read_all_();
+  for (const auto &[frame, reply] :
+       {std::pair{FRAME_PROCESS, REPLY_PROCESS}, std::pair{FRAME_MOTOR, REPLY_MOTOR},
+        std::pair{FRAME_GET_86_8, REPLY_REALIZED}, std::pair{FRAME_GET_86_10, REPLY_CONTROL_MODE_UNDERFLOOR},
+        std::pair{FRAME_GET_86_100, REPLY_OPERATING_MODE_NORMAL}}) {
+    ASSERT_EQ(this->next_request_(), frame);
+    this->reply_(reply);
+  }
+  EXPECT_TRUE(this->next_request_().empty());
   EXPECT_EQ(this->control_mode_.active_index(), UNDERFLOOR);
   EXPECT_EQ(this->operating_mode_.active_index(), 0u);
+  this->bus_.lose_connection();
+  this->bus_.establish_connection();
+  this->read_all_();
 }
 
 // A failed reply may still be answered late; a write waits for the next clean reply or update()
@@ -439,8 +484,8 @@ TEST_F(SelectTest, WriteWaitsWhenTheFirstPollFailed) {
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->pump_.status_has_warning());
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
-  this->reply_(REPLY_SELECTS);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // one object per request after the timeout
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // now the write
   this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
   EXPECT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);

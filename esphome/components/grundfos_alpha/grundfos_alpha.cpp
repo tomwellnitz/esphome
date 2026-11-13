@@ -19,8 +19,10 @@ static constexpr uint8_t IDENTITY_REQUEST[] = {CLASS_MEASURED_DATA, 0x03, 148, 1
 // warned_ holds a bit per object index below these flags
 static constexpr uint8_t WARNED_IDENTITY = 0x80;
 static constexpr uint8_t WARNED_SETTING = 0x40;
-static constexpr uint8_t WARNED_APDU_COUNT = 0x20;
-static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING | WARNED_APDU_COUNT;
+static constexpr uint8_t WARNED_SINGLE = 0x20;
+static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING | WARNED_SINGLE;
+// Class and length bytes of a reply APDU
+static constexpr size_t APDU_HEADER_SIZE = 2;
 
 // Grundfos GO app 8.5.2, unit_factor_mapping.csv: 1 m = 9804.14 Pa. The ALPHA3 factory limits of the constant
 // pressure set point (86/15: 19608, 39216, 58824 Pa) are whole multiples of 9804. The alpha3 component uses 10000.
@@ -222,31 +224,37 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   // on_disconnected() follows and marks the values unknown
   if (response.error == GenibusError::GENIBUS_ERROR_DISCONNECTED)
     return;
+  // A reply carries no object IDs, only an APDU per APDU of the request: one with another count is the late answer
+  // to another request
+  const size_t apdus = current == REQUEST_POLL ? this->batch_size_ : 1;
+  genibus::GenibusResponse checked = response;
+  if (response.error == GenibusError::GENIBUS_ERROR_NONE &&
+      (response.part(apdus - 1).apdus.empty() || !response.part(apdus).apdus.empty())) {
+    ESP_LOGD(TAG, "Reply does not have the %u APDUs of the request", static_cast<unsigned>(apdus));
+    checked = {GenibusError::GENIBUS_ERROR_MALFORMED, {}};
+  }
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
-  this->reply_failed_ = response.error != GenibusError::GENIBUS_ERROR_NONE;
+  this->reply_failed_ = checked.error != GenibusError::GENIBUS_ERROR_NONE;
   if (current == REQUEST_WRITE) {
-    this->continue_job_(response);
+    this->continue_job_(checked);
     return;
   }
 #endif
   if (current == REQUEST_IDENTITY) {
-    if (this->identify_(response))
+    if (this->identify_(checked))
       this->request_from_(0);
     return;
   }
   if (current != REQUEST_POLL || this->model_ == nullptr)
     return;
-  // The pump answers each APDU of a request; a reply with another count is the late answer to another request
-  genibus::GenibusResponse checked = response;
-  if (response.error == GenibusError::GENIBUS_ERROR_NONE &&
-      (response.part(this->batch_size_ - 1).apdus.empty() || !response.part(this->batch_size_).apdus.empty())) {
-    if (this->first_warning_(WARNED_APDU_COUNT)) {
-      ESP_LOGW(TAG, "Reply does not have the %u APDUs of the request", this->batch_size_);
+  // No reply to several objects at once, or not one for each: this firmware may not answer such a request, or may
+  // leave out an object it does not have. Single requests still work and find a missing object.
+  if (checked.error != GenibusError::GENIBUS_ERROR_NONE && this->batch_size_ > 1 && !this->single_) {
+    this->single_ = true;
+    if (this->first_warning_(WARNED_SINGLE)) {
+      ESP_LOGW(TAG, "No valid reply to %u objects in one request; asking one at a time until the next connection",
+               this->batch_size_);
     }
-    checked = {GenibusError::GENIBUS_ERROR_MALFORMED, {}};
-#ifdef USE_GRUNDFOS_ALPHA_WRITE
-    this->reply_failed_ = true;
-#endif
   }
   const size_t objects = this->model_->objects.size();
   for (uint8_t i = 0; i < this->batch_size_; i++) {
@@ -340,11 +348,17 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
     if (this->first_warning_(1u << index)) {
       ESP_LOGW(TAG, "The pump has no object %u/%u; its sensors stay unknown", layout.object, layout.sub_id);
     }
-  } else if (!ok && response.error == GenibusError::GENIBUS_ERROR_NONE && this->first_warning_(1u << index)) {
+  } else if (!ok && response.error == GenibusError::GENIBUS_ERROR_NONE) {
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+    // Maybe the late answer to another request, which a write must not follow
+    this->reply_failed_ = true;
+#endif
     // Never read offsets from another version of the object
-    ESP_LOGW(TAG, "Unexpected reply to object %u/%u: class %u, ACK %u, type 0x%04X v%u, %u bytes", layout.object,
-             layout.sub_id, apdu.data_class, apdu.ack, object.type, object.version,
-             static_cast<unsigned>(object.body.size()));
+    if (this->first_warning_(1u << index)) {
+      ESP_LOGW(TAG, "Unexpected reply to object %u/%u: class %u, ACK %u, type 0x%04X v%u, %u bytes", layout.object,
+               layout.sub_id, apdu.data_class, apdu.ack, object.type, object.version,
+               static_cast<unsigned>(object.body.size()));
+    }
   }
   for (const auto &field : layout.fields) {
     float value = NAN;
@@ -363,22 +377,33 @@ void GrundfosAlpha::request_from_(size_t step) {
   if (this->model_->settings != nullptr)
     steps += static_cast<size_t>(Setting::SETTING_COUNT);
 #endif
-  std::array<genibus::ObjectId, genibus::MAX_APDUS_PER_FRAME> ids{};
+  std::array<genibus::ObjectId, MAX_POLL_OBJECTS> ids{};
+  const size_t most = this->single_ ? 1 : ids.size();
   uint8_t count = 0;
-  for (; step < steps && count < ids.size(); step++) {
+  size_t reply = 0;
+  for (; step < steps && count < most; step++) {
+    genibus::ObjectId id{};
+    size_t size = 0;
     if (step < objects.size()) {
       const ObjectLayout &layout = objects[step];
       if ((this->missing_ & (1u << step)) != 0 || !this->wants_(layout))
         continue;
-      ids[count] = {layout.object, layout.sub_id};
+      id = {layout.object, layout.sub_id};
+      size = layout.size;
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
     } else {
       const size_t i = step - objects.size();
       if (!this->wants_setting_(static_cast<Setting>(i)))
         continue;
-      ids[count] = {SETTINGS_OBJECT, (*this->model_->settings)[i].sub_id};
+      const SettingLayout &layout = (*this->model_->settings)[i];
+      id = {SETTINGS_OBJECT, layout.sub_id};
+      size = layout.size;
 #endif
     }
+    reply += APDU_HEADER_SIZE + genibus::DATA_OBJECT_HEADER_SIZE + size;
+    if (count != 0 && reply > MAX_POLL_REPLY)
+      break;
+    ids[count] = id;
     this->batch_[count++] = static_cast<uint8_t>(step);
   }
   if (count != 0 && this->request_objects_({ids.data(), count})) {
@@ -472,12 +497,19 @@ bool GrundfosAlpha::parse_setting_(Setting setting, const genibus::GenibusRespon
   const bool ok = reader.next(apdu) && apdu.data_class == genibus::CLASS_DATA_OBJECT &&
                   genibus::parse_data_object(apdu, object) && object.status == 0 && object.type == layout.type &&
                   object.version == layout.version && object.body.size() == layout.size;
-  if (!ok && this->first_warning_(WARNED_SETTING)) {
+  if (ok)
+    return true;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  // Maybe the late answer to another request, which a write must not follow
+  if (!genibus::is_object_missing(apdu))
+    this->reply_failed_ = true;
+#endif
+  if (this->first_warning_(WARNED_SETTING)) {
     ESP_LOGW(TAG, "Unexpected reply to object 86/%u: class %u, ACK %u, status %u, type 0x%04X v%u, %u bytes",
              layout.sub_id, apdu.data_class, apdu.ack, object.status, object.type, object.version,
              static_cast<unsigned>(object.body.size()));
   }
-  return ok;
+  return false;
 }
 
 bool GrundfosAlpha::decode_setting_(Setting setting, const genibus::GenibusResponse &response) {

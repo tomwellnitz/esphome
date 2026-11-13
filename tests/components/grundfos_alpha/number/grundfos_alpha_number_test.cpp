@@ -2,6 +2,8 @@
 
 #include "esphome/components/number/number.h"
 
+#include <utility>
+
 namespace esphome::grundfos_alpha::testing {
 
 namespace {
@@ -47,6 +49,35 @@ TEST_F(NumberTest, ReadsControlModeLimitsOnceAndTheSetPoint) {
   EXPECT_NEAR(this->number_.state, 39214.0f / 9804.0f, 1e-4f);
   this->pump_.update();
   EXPECT_EQ(this->next_request_(), FRAME_GET_CP_NO_LIMITS);
+}
+
+// With every entity, a request holds at most 4 objects whose reply is no larger than the largest a real ALPHA3 sent
+// (LE 0x71, FRAME_RECORDED_POLL)
+TEST_F(NumberTest, PollRepliesStayWithinTheRecordedSize) {
+  TestNumber proportional, speed;
+  this->use_all_();
+  this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
+  this->pump_.set_number(PROPORTIONAL_PRESSURE, &proportional);
+  this->pump_.set_number(CONSTANT_SPEED, &speed);
+  this->identify_();
+  const std::pair<Bytes, Bytes> polls[] = {
+      {FRAME_RECORDED_POLL, bundle({REPLY_PROCESS, REPLY_MOTOR, REPLY_REALIZED, REPLY_CONTROL_MODE_CP})},
+      {bundle({FRAME_GET_86_100, FRAME_GET_86_15, FRAME_GET_86_16}),
+       bundle({REPLY_OPERATING_MODE_NORMAL, REPLY_CP_LIMITS, REPLY_CP_SETPOINT})},
+      {bundle({FRAME_GET_86_17, FRAME_GET_86_18, FRAME_GET_86_13}),
+       bundle({REPLY_PP_LIMITS, REPLY_PP_SETPOINT, REPLY_CS_LIMITS})},
+      {FRAME_GET_86_14, REPLY_CS_SETPOINT},
+  };
+  for (const auto &[frame, reply] : polls) {
+    ASSERT_EQ(this->next_request_(), frame);
+    EXPECT_LE(reply[1], REPLY_RECORDED_POLL[1]);
+    this->reply_(reply);
+  }
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_NEAR(this->number_.state, 39214.0f / 9804.0f, 1e-4f);
+  EXPECT_FALSE(std::isnan(proportional.state));
+  EXPECT_FALSE(std::isnan(speed.state));
+  EXPECT_FALSE(this->pump_.status_has_warning());
 }
 
 TEST_F(NumberTest, WritesOnlyTheConstantPressureSetPoint) {

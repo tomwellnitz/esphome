@@ -35,21 +35,50 @@ TEST_F(GrundfosAlphaTest, DecodesTheRecordedReplyOfBothObjects) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
-// GENIbus replies carry no object IDs: a reply with fewer or more APDUs than asked for is not spread over the objects
-TEST_F(GrundfosAlphaTest, ReplyWithAnotherApduCountGivesNan) {
+// GENIbus replies carry no object IDs: a reply with fewer or more APDUs than asked for is not spread over the objects.
+// After it, the objects go one per request until the next connection, and a single request too checks the count.
+TEST_F(GrundfosAlphaTest, ReplyWithAnotherApduCountGivesNanThenSingleRequests) {
   this->read_all_();
-  for (const Bytes &reply : {REPLY_PROCESS, bundle({REPLY_PROCESS, REPLY_MOTOR, REPLY_MOTOR})}) {
-    this->pump_.update();
-    ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
-    this->reply_(reply);
-    EXPECT_TRUE(std::isnan(this->flow_.state));
-    EXPECT_TRUE(std::isnan(this->power_.state));
-    EXPECT_TRUE(this->next_request_().empty());
-    this->pump_.update();
-    ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
-    this->reply_(REPLY_PROCESS_MOTOR);
-    EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
-  }
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS);
+  EXPECT_TRUE(std::isnan(this->flow_.state));
+  EXPECT_TRUE(std::isnan(this->power_.state));
+  EXPECT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  EXPECT_FLOAT_EQ(this->head_.state, 4.0f);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
+  EXPECT_TRUE(std::isnan(this->power_.state));
+  EXPECT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
+  this->bus_.lose_connection();
+  this->bus_.establish_connection();
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+}
+
+// Assumed, not recorded: a firmware without an object leaves its APDU out of the reply to several objects. The
+// single requests that follow find the missing object (a real ALPHA3 answers a single GET of one with 0A 01 04).
+TEST_F(GrundfosAlphaTest, ObjectLeftOutOfTheReplyIsFoundBySingleRequests) {
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_TRUE(std::isnan(this->voltage_.state));
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_OBJECT_MISSING);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_FLOAT_EQ(this->voltage_.state, 230.0f);
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_MOTOR);
 }
 
 TEST_F(GrundfosAlphaTest, IdentifiesOnlyOnce) {
@@ -136,6 +165,7 @@ TEST_F(GrundfosAlphaTest, UnexpectedVersionIsNotDecoded) {
   EXPECT_TRUE(std::isnan(this->speed_.state));
 }
 
+// Assumed, not recorded: an APDU of the reply to several objects reports an error for its object
 TEST_F(GrundfosAlphaTest, ErrorAckGivesNanForItsObjectOnly) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
@@ -147,6 +177,7 @@ TEST_F(GrundfosAlphaTest, ErrorAckGivesNanForItsObjectOnly) {
   EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
 }
 
+// Assumed, not recorded: an APDU of the reply to several objects says its object is missing
 TEST_F(GrundfosAlphaTest, MissingObjectGivesNanAndIsSkippedUntilReconnect) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
@@ -179,6 +210,13 @@ TEST_F(GrundfosAlphaTest, TimeoutGivesNanForEveryObjectOfTheRequest) {
   EXPECT_TRUE(std::isnan(this->power_.state));
   this->now_ += QUIET_MS;
   EXPECT_TRUE(this->next_request_().empty());
+  // This firmware may not answer several objects at once
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
 }
 
 TEST_F(GrundfosAlphaTest, SkipsUpdateWhileBusy) {
