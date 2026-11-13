@@ -383,10 +383,6 @@ void GrundfosAlpha::dump_config() {
   LOG_NUMBER("  ", "Pump kick wait", this->numbers_[6]);
   LOG_NUMBER("  ", "Pump kick duration", this->numbers_[7]);
 #endif
-#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
-  LOG_SWITCH("  ", "Pump kick", this->pump_kick_switch_);
-  LOG_SWITCH("  ", "Clock program", this->clock_program_switch_);
-#endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
   LOG_BUTTON("  ", "Start", this->start_button_);
   LOG_BUTTON("  ", "Stop", this->stop_button_);
@@ -397,6 +393,8 @@ void GrundfosAlpha::dump_config() {
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
   LOG_SWITCH("  ", "Automatic night setback", this->automatic_night_setback_switch_);
+  LOG_SWITCH("  ", "Pump kick", this->pump_kick_switch_);
+  LOG_SWITCH("  ", "Clock program", this->clock_program_switch_);
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
   ESP_LOGCONFIG(TAG, "  Sets the pump's clock from the time source");
