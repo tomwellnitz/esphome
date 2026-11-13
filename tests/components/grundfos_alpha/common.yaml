@@ -22,6 +22,7 @@ grundfos_alpha:
   address: 0xE7
   update_interval: 30s
   time_id: grundfos_alpha_time
+  set_clock: true
 
 sensor:
   - platform: grundfos_alpha
