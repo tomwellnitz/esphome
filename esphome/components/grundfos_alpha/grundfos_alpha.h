@@ -129,14 +129,16 @@ struct Model {
   const SettingLayouts *settings;
 };
 
-// Values of current_ besides a step of the poll chain
+// Values of current_
+static constexpr uint8_t REQUEST_POLL = 0xFC;  // the steps of the poll chain in batch_
 static constexpr uint8_t REQUEST_WRITE = 0xFD;
 static constexpr uint8_t REQUEST_IDENTITY = 0xFE;
 static constexpr uint8_t REQUEST_NONE = 0xFF;
 
 /// A Grundfos ALPHA circulator pump. It reads the pump's unit family, type and version once, then polls the
-/// objects of that model: the measurements first, then the settings its entities show. A write reads the settings
-/// object, checks it against the last poll, changes one value, writes it and reads it back; writes run one at a time.
+/// objects of that model, up to genibus::MAX_APDUS_PER_FRAME in one request: the measurements first, then the settings
+/// its entities show. A write reads the settings object, checks it against the last poll, changes one value, writes it
+/// and reads it back; writes run one at a time, each in requests of their own.
 class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_SENSOR
   SUB_SENSOR(flow)
@@ -185,7 +187,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
  protected:
   bool identify_(const genibus::GenibusResponse &response);
   void decode_(uint8_t index, const genibus::GenibusResponse &response);
-  /// Send the request of the first wanted step from step on: the measurement objects, then the settings.
+  /// Send one request for the next wanted steps from step on, up to genibus::MAX_APDUS_PER_FRAME: the measurement
+  /// objects, then the settings.
   void request_from_(size_t step);
   bool wants_(const ObjectLayout &layout) const;
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
@@ -226,7 +229,10 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
 
   const Model *model_{nullptr};
-  uint8_t current_{REQUEST_NONE};  // step of the poll chain on the wire, or REQUEST_IDENTITY
+  uint8_t current_{REQUEST_NONE};
+  // The steps of the poll chain on the wire, in the order of the request
+  std::array<uint8_t, genibus::MAX_APDUS_PER_FRAME> batch_{};
+  uint8_t batch_size_{0};
   uint8_t warned_{0};
   uint8_t missing_{0};  // a bit per object index the pump does not have
   bool unsupported_{false};

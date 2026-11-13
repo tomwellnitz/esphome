@@ -58,7 +58,7 @@ TEST_F(CommandTest, CommandRefreshesTheSettings) {
   this->pump_.send_command(Command::COMMAND_START);
   ASSERT_EQ(this->next_request_(), FRAME_COMMAND_6);
   this->reply_(REPLY_COMMAND_ACK);
-  EXPECT_EQ(this->next_request_(), FRAME_GET_86_10);
+  EXPECT_EQ(this->next_request_(), FRAME_GET_SELECTS);
 }
 
 // The stop command sets the requested operating mode (86/100) as well; the refresh after it shows Stop
@@ -67,10 +67,8 @@ TEST_F(CommandTest, StopShowsInTheOperatingModeSelect) {
   this->pump_.send_command(Command::COMMAND_STOP);
   ASSERT_EQ(this->next_request_(), FRAME_COMMAND_5);
   this->reply_(REPLY_COMMAND_ACK);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_STOP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_STOP}));
   EXPECT_EQ(this->operating_mode_.active_index(), STOP);
   EXPECT_FALSE(this->pump_.status_has_warning());
 }
@@ -92,10 +90,8 @@ TEST_F(CommandTest, WaitingCommandIsDroppedOnDisconnect) {
   this->bus_.lose_connection();
   EXPECT_TRUE(this->pump_.status_has_warning());
   this->bus_.establish_connection();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->wrote_(FRAME_COMMAND_5));
 }
@@ -111,13 +107,13 @@ TEST_F(CommandTest, DisconnectDuringCommandIsWarned) {
 TEST_F(CommandTest, FullQueueRefusesMore) {
   this->read_selects_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // a poll is on the wire, so the writes wait
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);  // a poll is on the wire, so the writes wait
   this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
   this->pump_.write_select(OPERATING_MODE, MAX);
   this->pump_.send_command(Command::COMMAND_STOP);
   this->pump_.send_command(Command::COMMAND_START);
   this->pump_.send_command(Command::COMMAND_RESET_ALARM);  // the fifth: refused
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
   ASSERT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);
@@ -125,10 +121,8 @@ TEST_F(CommandTest, FullQueueRefusesMore) {
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_CURVE);
   // 86/100 is polled again after the control mode write
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CURVE);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL_CURVE);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_CURVE, REPLY_OPERATING_MODE_NORMAL_CURVE}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_NORMAL_CURVE);
   ASSERT_EQ(this->next_request_(), FRAME_SET_OPERATING_MODE_MAX_CURVE);
@@ -140,7 +134,7 @@ TEST_F(CommandTest, FullQueueRefusesMore) {
   ASSERT_EQ(this->next_request_(), FRAME_COMMAND_6);
   this->reply_(REPLY_COMMAND_ACK);
   // Then the refresh; the refused command never comes
-  EXPECT_EQ(this->next_request_(), FRAME_GET_86_10);
+  EXPECT_EQ(this->next_request_(), FRAME_GET_SELECTS);
   EXPECT_FALSE(this->wrote_(FRAME_COMMAND_2));
 }
 

@@ -19,7 +19,8 @@ static constexpr uint8_t IDENTITY_REQUEST[] = {CLASS_MEASURED_DATA, 0x03, 148, 1
 // warned_ holds a bit per object index below these flags
 static constexpr uint8_t WARNED_IDENTITY = 0x80;
 static constexpr uint8_t WARNED_SETTING = 0x40;
-static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING;
+static constexpr uint8_t WARNED_APDU_COUNT = 0x20;
+static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING | WARNED_APDU_COUNT;
 
 // Grundfos GO app 8.5.2, unit_factor_mapping.csv: 1 m = 9804.14 Pa. The ALPHA3 factory limits of the constant
 // pressure set point (86/15: 19608, 39216, 58824 Pa) are whole multiples of 9804. The alpha3 component uses 10000.
@@ -233,24 +234,37 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
       this->request_from_(0);
     return;
   }
-  if (this->model_ == nullptr)
+  if (current != REQUEST_POLL || this->model_ == nullptr)
     return;
-  const size_t objects = this->model_->objects.size();
-  if (current < objects) {
-    this->decode_(current, response);
-#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
-  } else if (this->model_->settings != nullptr && current < objects + static_cast<size_t>(Setting::SETTING_COUNT)) {
-    this->decode_setting_(static_cast<Setting>(current - objects), response);
+  // The pump answers each APDU of a request; a reply with another count is the late answer to another request
+  genibus::GenibusResponse checked = response;
+  if (response.error == GenibusError::GENIBUS_ERROR_NONE &&
+      (response.part(this->batch_size_ - 1).apdus.empty() || !response.part(this->batch_size_).apdus.empty())) {
+    if (this->first_warning_(WARNED_APDU_COUNT)) {
+      ESP_LOGW(TAG, "Reply does not have the %u APDUs of the request", this->batch_size_);
+    }
+    checked = {GenibusError::GENIBUS_ERROR_MALFORMED, {}};
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+    this->reply_failed_ = true;
 #endif
-  } else {
-    return;
+  }
+  const size_t objects = this->model_->objects.size();
+  for (uint8_t i = 0; i < this->batch_size_; i++) {
+    const uint8_t step = this->batch_[i];
+    if (step < objects) {
+      this->decode_(step, checked.part(i));
+#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
+    } else {
+      this->decode_setting_(static_cast<Setting>(step - objects), checked.part(i));
+#endif
+    }
   }
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   // A write goes before the rest of the poll chain, but not right after a failed reply
   if (!this->reply_failed_ && this->start_job_())
     return;
 #endif
-  this->request_from_(current + 1);
+  this->request_from_(this->batch_[this->batch_size_ - 1] + 1u);
 }
 
 void GrundfosAlpha::on_disconnected() {
@@ -344,25 +358,33 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
 
 void GrundfosAlpha::request_from_(size_t step) {
   const auto objects = this->model_->objects;
-  for (; step < objects.size(); step++) {
-    const ObjectLayout &layout = objects[step];
-    if ((this->missing_ & (1u << step)) != 0 || !this->wants_(layout))
-      continue;
-    if (this->request_object_(layout.object, layout.sub_id))
-      this->current_ = static_cast<uint8_t>(step);
-    return;
-  }
+  size_t steps = objects.size();
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
-  if (this->model_->settings == nullptr)
-    return;
-  for (size_t i = step - objects.size(); i < static_cast<size_t>(Setting::SETTING_COUNT); i++) {
-    if (!this->wants_setting_(static_cast<Setting>(i)))
-      continue;
-    if (this->request_object_(SETTINGS_OBJECT, (*this->model_->settings)[i].sub_id))
-      this->current_ = static_cast<uint8_t>(objects.size() + i);
-    return;
-  }
+  if (this->model_->settings != nullptr)
+    steps += static_cast<size_t>(Setting::SETTING_COUNT);
 #endif
+  std::array<genibus::ObjectId, genibus::MAX_APDUS_PER_FRAME> ids{};
+  uint8_t count = 0;
+  for (; step < steps && count < ids.size(); step++) {
+    if (step < objects.size()) {
+      const ObjectLayout &layout = objects[step];
+      if ((this->missing_ & (1u << step)) != 0 || !this->wants_(layout))
+        continue;
+      ids[count] = {layout.object, layout.sub_id};
+#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
+    } else {
+      const size_t i = step - objects.size();
+      if (!this->wants_setting_(static_cast<Setting>(i)))
+        continue;
+      ids[count] = {SETTINGS_OBJECT, (*this->model_->settings)[i].sub_id};
+#endif
+    }
+    this->batch_[count++] = static_cast<uint8_t>(step);
+  }
+  if (count != 0 && this->request_objects_({ids.data(), count})) {
+    this->batch_size_ = count;
+    this->current_ = REQUEST_POLL;
+  }
 }
 
 bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
