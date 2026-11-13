@@ -184,10 +184,25 @@ void GenibusBus::connection_established_() {
     pending.device->on_connected();
 }
 
-bool GenibusDevice::request_object_(uint8_t object, uint16_t sub_id) {
-  uint8_t apdu[5];
-  put_get_object(apdu, object, sub_id);
-  return this->parent_->send(this, apdu);
+GenibusResponse GenibusResponse::part(size_t index) const {
+  ApduReader reader(this->apdus);
+  Apdu apdu{};
+  for (size_t i = 0; reader.next(apdu); i++) {
+    // The class and length bytes come right before the data
+    if (i == index)
+      return {this->error, {apdu.data.data() - 2, apdu.data.size() + 2}};
+  }
+  return {this->error, {}};
+}
+
+bool GenibusDevice::request_objects_(std::span<const ObjectId> objects) {
+  if (objects.empty() || objects.size() > MAX_GET_OBJECTS)
+    return false;
+  uint8_t apdus[MAX_GET_OBJECTS * GET_OBJECT_SIZE];
+  uint8_t *end = apdus;
+  for (const auto &id : objects)
+    end = put_get_object(end, id.object, id.sub_id);
+  return this->parent_->send(this, {apdus, static_cast<size_t>(end - apdus)});
 }
 
 bool GenibusDevice::set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
