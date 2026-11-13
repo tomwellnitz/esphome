@@ -13,8 +13,9 @@ CONF_START = "start"
 
 Command = grundfos_alpha_ns.enum("Command", is_class=True)
 
-# The class 3 commands the Grundfos GO app sends to an ALPHA3. Whether a stop lasts through a loss of power is not
-# tested yet.
+# The class 3 commands the Grundfos GO app sends to an ALPHA3. A stop lasts through a loss of power until a start: a
+# stopped pump stays off even when its power comes back. Without ESPHome, holding the pump's Connect button for
+# 2 seconds starts it again, but also moves the control mode on by one step.
 # key: icon
 _BUTTONS = {
     CONF_START: "mdi:play",

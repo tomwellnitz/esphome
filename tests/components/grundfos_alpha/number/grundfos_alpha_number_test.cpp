@@ -226,20 +226,43 @@ TEST_F(NumberTest, WrongVersionOnTheReadIsNotWritten) {
   EXPECT_FALSE(this->wrote_(FRAME_SET_CP_3_5));
 }
 
-TEST_F(NumberTest, SetPointWaitsForThePollsAfterReconnect) {
+TEST_F(NumberTest, LimitsAreReadAgainAfterReconnect) {
   this->read_constant_pressure_();
   this->bus_.lose_connection();
   this->bus_.establish_connection();
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // the poll after connecting is on the wire
-  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);  // the limits are kept, so it is queued
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);  // refused: the limits are not read again yet
   this->reply_(REPLY_CONTROL_MODE_CP);
-  // 86/16 first, then the write; no warning for the wait
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
+  this->reply_(REPLY_CP_LIMITS);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
   this->reply_(REPLY_CP_SETPOINT);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
-  EXPECT_EQ(this->next_request_(), FRAME_SET_CP_3_5);
+  ASSERT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->wrote_(FRAME_SET_CP_3_5));
+  this->write_3_5_until_set_();
   EXPECT_FALSE(this->pump_.status_has_warning());
+}
+
+TEST_F(NumberTest, ImplausibleLimitsAreNotKeptAndReadAgain) {
+  this->pump_.set_number(CONSTANT_PRESSURE, &this->number_);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
+  this->reply_(REPLY_CP_LIMITS_SWAPPED);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  this->pump_.write_number(CONSTANT_PRESSURE, 3.5f);
+  EXPECT_TRUE(this->next_request_().empty());
+  // The next poll reads the limits again
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_CP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
+  this->reply_(REPLY_CP_LIMITS);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
+  this->reply_(REPLY_CP_SETPOINT);
+  this->write_3_5_until_set_();
 }
 
 TEST_F(NumberTest, SetPointWaitsForTheControlMode) {

@@ -18,6 +18,8 @@ namespace esphome::genibus {
 static constexpr size_t MAX_REQUEST_SIZE = 32;
 // The largest object body a class 10 SET fits into one request
 static constexpr size_t MAX_SET_BODY_SIZE = MAX_REQUEST_SIZE - 2 - SET_OBJECT_HEADER_SIZE;
+// The most class 10 GETs one request holds. A device may answer fewer; it sets its own limit.
+static constexpr size_t MAX_GET_OBJECTS = MAX_REQUEST_SIZE / GET_OBJECT_SIZE;
 
 enum class GenibusError : uint8_t {
   GENIBUS_ERROR_NONE,
@@ -38,6 +40,16 @@ enum class GenibusError : uint8_t {
 struct GenibusResponse {
   GenibusError error;
   std::span<const uint8_t> apdus;
+
+  /// The APDU at index as a response of its own, with the same error; its APDUs are empty when the reply has fewer.
+  /// A reply holds the APDUs in the order of the request and does not name the objects again.
+  GenibusResponse part(size_t index) const;
+};
+
+/// A class 10 data object.
+struct ObjectId {
+  uint8_t object;
+  uint16_t sub_id;
 };
 
 class GenibusDevice;
@@ -122,7 +134,14 @@ class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
   uint8_t get_address() const { return this->address_; }
 
  protected:
-  bool request_object_(uint8_t object, uint16_t sub_id);
+  bool request_object_(uint8_t object, uint16_t sub_id) {
+    const ObjectId id{object, sub_id};
+    return this->request_objects_({&id, 1});
+  }
+  /// Send a class 10 GET of up to MAX_GET_OBJECTS objects in one frame; the reply has an APDU per object, in this
+  /// order (see GenibusResponse::part()). False, sending nothing, when there are none or too many. Not every device
+  /// answers that many in one request; the device component knows its limit.
+  bool request_objects_(std::span<const ObjectId> objects);
   /// Send a class 10 SET of object/sub_id; false, sending nothing, when the body is empty or longer than
   /// MAX_SET_BODY_SIZE, or when send() refuses it.
   bool set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version, std::span<const uint8_t> body);
