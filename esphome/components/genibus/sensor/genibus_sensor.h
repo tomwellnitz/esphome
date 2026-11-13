@@ -24,22 +24,22 @@ uint8_t value_size(ValueType type);
 /// Read the big-endian value of type at offset of body; NAN when it does not fit into body.
 float read_value(std::span<const uint8_t> body, uint8_t offset, ValueType type);
 
-/// Draft: one value at a fixed offset of a class 10 data object, read at every update. It never writes.
-/// With an expected type or version set, a reply with another type or version is not decoded.
-class GenibusSensor : public sensor::Sensor, public GenibusDevice {
- public:
-  GenibusSensor(uint8_t object, uint16_t sub_id, uint8_t offset, ValueType type)
-      : sub_id_(sub_id), object_(object), offset_(offset), type_(type) {}
+/// Read the data object in a class 10 reply. Unlike parse_data_object() it also takes a body that the device cut
+/// short: an ALPHA3 sends at most 46 body bytes of a larger object and keeps the full size in the header.
+bool parse_object_prefix(const Apdu &apdu, DataObject &object);
 
-  void set_expected_type(uint16_t type) {
-    this->expected_type_ = type;
-    this->check_type_ = true;
-  }
-  void set_expected_version(uint8_t version) {
-    this->expected_version_ = version;
-    this->check_version_ = true;
-  }
-  void set_multiply(float multiply) { this->multiply_ = multiply; }
+/// Draft: one value at a fixed offset of a class 10 data object, read at every update. It never writes.
+/// A reply names no object, so only a reply with the expected type and version is decoded.
+class GenibusSensor final : public sensor::Sensor, public GenibusDevice {
+ public:
+  GenibusSensor(uint8_t object, uint16_t sub_id, uint8_t offset, ValueType type, uint16_t expected_type,
+                uint8_t expected_version)
+      : sub_id_(sub_id),
+        expected_type_(expected_type),
+        object_(object),
+        offset_(offset),
+        type_(type),
+        expected_version_(expected_version) {}
 
   void update() override;
   void dump_config() override;
@@ -50,17 +50,17 @@ class GenibusSensor : public sensor::Sensor, public GenibusDevice {
  protected:
   float decode_(const GenibusResponse &response);
 
-  float multiply_{1.0f};
   uint16_t sub_id_;
-  uint16_t expected_type_{0};
+  uint16_t expected_type_;
   uint8_t object_;
   uint8_t offset_;
   ValueType type_;
-  uint8_t expected_version_{0};
-  bool check_type_{false};
-  bool check_version_{false};
+  uint8_t expected_version_;
+  // Replies in a row that say the object is missing; one alone may be a late reply to another device
+  uint8_t missing_replies_{0};
   bool missing_{false};  // the device has no such object; asked again after the next connection
-  bool warned_{false};
+  bool warned_missing_{false};
+  bool warned_unexpected_{false};
 };
 
 }  // namespace esphome::genibus

@@ -6,7 +6,7 @@ The schema is a proposal to be agreed with the maintainers before it is submitte
 import esphome.codegen as cg
 from esphome.components import genibus, sensor
 import esphome.config_validation as cv
-from esphome.const import CONF_ADDRESS, CONF_ID, CONF_MULTIPLY, CONF_OFFSET, CONF_TYPE
+from esphome.const import CONF_ADDRESS, CONF_ID, CONF_OFFSET, CONF_TYPE
 from esphome.types import ConfigType
 
 CONF_EXPECTED_TYPE = "expected_type"
@@ -31,8 +31,9 @@ VALUE_TYPES = {
     "double": (ValueType.VALUE_TYPE_DOUBLE, 8),
 }
 
-# A reply APDU holds at most 63 data bytes, 7 of them the object header
-MAX_BODY_SIZE = 63 - 7
+# An ALPHA3 sends at most 46 body bytes of a data object and cuts larger ones short
+# (93/78 with 80 bytes and 53/2 with 98 bytes, both read on 12.11.2026)
+MAX_BODY_SIZE = 46
 
 
 def _validate_offset(config: ConfigType) -> ConfigType:
@@ -58,9 +59,9 @@ CONFIG_SCHEMA = cv.All(
             cv.Required(CONF_SUB_ID): cv.uint16_t,
             cv.Required(CONF_OFFSET): cv.uint8_t,
             cv.Required(CONF_TYPE): cv.one_of(*VALUE_TYPES, lower=True),
-            cv.Optional(CONF_EXPECTED_TYPE): cv.hex_uint16_t,
-            cv.Optional(CONF_EXPECTED_VERSION): cv.uint8_t,
-            cv.Optional(CONF_MULTIPLY): cv.float_,
+            # A reply names no object: type and version tell a late reply to another request apart
+            cv.Required(CONF_EXPECTED_TYPE): cv.hex_uint16_t,
+            cv.Required(CONF_EXPECTED_VERSION): cv.uint8_t,
         }
     ),
     _validate_offset,
@@ -74,9 +75,8 @@ async def to_code(config: ConfigType) -> None:
         config[CONF_SUB_ID],
         config[CONF_OFFSET],
         VALUE_TYPES[config[CONF_TYPE]][0],
+        config[CONF_EXPECTED_TYPE],
+        config[CONF_EXPECTED_VERSION],
     )
     await sensor.register_sensor(var, config)
     await genibus.register_genibus_device(var, config)
-    cg.add_optional(var.set_expected_type, config.get(CONF_EXPECTED_TYPE))
-    cg.add_optional(var.set_expected_version, config.get(CONF_EXPECTED_VERSION))
-    cg.add_optional(var.set_multiply, config.get(CONF_MULTIPLY))
