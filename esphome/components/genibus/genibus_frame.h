@@ -17,6 +17,7 @@ static constexpr size_t FRAME_OVERHEAD = 4;
 static constexpr size_t MIN_FRAME_SIZE = FRAME_OVERHEAD + 2;
 static constexpr size_t MAX_FRAME_SIZE = FRAME_OVERHEAD + 255;
 
+static constexpr uint8_t CLASS_COMMAND = 3;
 static constexpr uint8_t CLASS_DATA_OBJECT = 10;
 
 // Operation in bits 7-6 of the second APDU byte of a request; bits 5-0 hold the data length
@@ -51,6 +52,9 @@ uint8_t *put_get_object(uint8_t *dst, uint8_t object, uint16_t sub_id);
 /// acknowledged and stored such SETs.
 uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
                         std::span<const uint8_t> body);
+/// Write a class 3 SET APDU of one command (3 bytes) and return the pointer past it. Any command ID is accepted;
+/// the device component decides which commands it offers.
+uint8_t *put_command(uint8_t *dst, uint8_t command);
 
 /// One APDU; data points into the frame.
 struct Apdu {

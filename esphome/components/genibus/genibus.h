@@ -125,6 +125,8 @@ class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
   /// Send a class 10 SET of object/sub_id; false, sending nothing, when the body is empty or longer than
   /// MAX_SET_BODY_SIZE, or when send() refuses it.
   bool set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version, std::span<const uint8_t> body);
+  /// Send one class 3 command.
+  bool send_command_(uint8_t command);
 
   uint8_t address_{0};
 };

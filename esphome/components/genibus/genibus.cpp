@@ -202,4 +202,10 @@ bool GenibusDevice::set_object_(uint8_t object, uint16_t sub_id, uint16_t type, 
   return this->parent_->send(this, {apdu, static_cast<size_t>(end - apdu)});
 }
 
+bool GenibusDevice::send_command_(uint8_t command) {
+  uint8_t apdu[3];
+  put_command(apdu, command);
+  return this->parent_->send(this, apdu);
+}
+
 }  // namespace esphome::genibus

@@ -46,6 +46,13 @@ uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t 
   return std::copy(body.begin(), body.end(), dst);
 }
 
+uint8_t *put_command(uint8_t *dst, uint8_t command) {
+  *dst++ = CLASS_COMMAND;
+  *dst++ = OPERATION_SET | 1;
+  *dst++ = command;
+  return dst;
+}
+
 bool ApduReader::next(Apdu &apdu) {
   if (this->rest_.size() < 2)
     return false;
