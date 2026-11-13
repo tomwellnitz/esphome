@@ -158,6 +158,7 @@ void GrundfosAlpha::update() {
       this->status_clear_warning();
     }
   }
+  this->drop_stuck_write_();
   if (this->start_job_())
     return;
 #endif
@@ -474,6 +475,23 @@ bool GrundfosAlpha::enqueue_(const WriteRequest &request, const LogString *what)
   if (!this->reply_failed_ && !this->parent_->is_busy(this))
     this->start_job_();
   return true;
+}
+
+void GrundfosAlpha::drop_stuck_write_() {
+  if (this->queued_ == 0 || this->phase_ != JobPhase::JOB_PHASE_NONE || this->job_ready_(this->queue_[0])) {
+    this->waited_ = 0;
+    return;
+  }
+  // An object that never has a valid read, for example after a firmware update, would block the writes behind it
+  if (++this->waited_ < WRITE_WAIT_CYCLES)
+    return;
+  this->waited_ = 0;
+  ESP_LOGW(TAG, "Write to %u/%u dropped: no valid read of the object", SETTINGS_OBJECT,
+           (*this->model_->settings)[static_cast<size_t>(this->queue_[0].setting)].sub_id);
+  std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
+  this->queued_--;
+  this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
+  this->status_set_warning(LOG_STR("Write failed"));
 }
 
 bool GrundfosAlpha::start_job_() {

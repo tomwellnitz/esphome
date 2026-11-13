@@ -436,6 +436,33 @@ TEST_F(SelectTest, WriteWaitsWhenTheFirstPollFailed) {
   EXPECT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);
 }
 
+TEST_F(SelectTest, WriteWithoutAValidReadIsDroppedAfterSomeUpdates) {
+  this->use_selects_();
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_V2);  // never a valid read of 86/10
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
+  for (uint8_t i = 1; i < WRITE_WAIT_CYCLES; i++) {
+    this->pump_.update();
+    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+    this->reply_(REPLY_CONTROL_MODE_V2);
+    ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+    this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  }
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  this->pump_.update();
+  EXPECT_TRUE(this->pump_.status_has_warning());
+  // The write is gone: a valid read of 86/10 now starts nothing
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
+  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->wrote_(FRAME_SET_CONTROL_MODE_CURVE));
+}
+
 TEST_F(SelectTest, UnsupportedModelOffersNoWrite) {
   this->use_selects_();
   this->pump_.update();
