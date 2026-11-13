@@ -193,4 +193,13 @@ bool GenibusDevice::request_object_(uint8_t object, uint16_t sub_id) {
   return this->parent_->send(this, apdu);
 }
 
+bool GenibusDevice::set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
+                                std::span<const uint8_t> body) {
+  if (body.empty() || body.size() > MAX_SET_BODY_SIZE)
+    return false;
+  uint8_t apdu[MAX_REQUEST_SIZE];
+  const uint8_t *end = put_set_object(apdu, object, sub_id, type, version, body);
+  return this->parent_->send(this, {apdu, static_cast<size_t>(end - apdu)});
+}
+
 }  // namespace esphome::genibus

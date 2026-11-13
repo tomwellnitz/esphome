@@ -21,10 +21,13 @@ static constexpr uint8_t CLASS_DATA_OBJECT = 10;
 
 // Operation in bits 7-6 of the second APDU byte of a request; bits 5-0 hold the data length
 static constexpr uint8_t OPERATION_GET = 0x00;
+static constexpr uint8_t OPERATION_SET = 0x80;
 static constexpr uint8_t APDU_LENGTH_MASK = 0x3F;
 
 // status, type (2), version, size (3)
 static constexpr size_t DATA_OBJECT_HEADER_SIZE = 7;
+// object, sub ID (2), type (2), version, size (3)
+static constexpr size_t SET_OBJECT_HEADER_SIZE = 9;
 
 // ACK code of a reply APDU: the data item ID is unknown
 static constexpr uint8_t ACK_UNKNOWN_ID = 2;
@@ -41,6 +44,13 @@ size_t build_request(std::span<uint8_t> out, uint8_t destination, uint8_t source
 /// it. The 2005 specification does not describe class 10; this is the request the Grundfos GO app and the alpha3
 /// component send, and a real ALPHA3 answers it.
 uint8_t *put_get_object(uint8_t *dst, uint8_t object, uint16_t sub_id);
+/// Write a class 10 SET APDU of object/sub_id (11 bytes plus the body) and return the pointer past it. type and
+/// version are those the device reported for the object; body.size() must not exceed
+/// APDU_LENGTH_MASK - SET_OBJECT_HEADER_SIZE. The 2005 specification does not describe class 10; this layout comes
+/// from recorded traffic of the Grundfos GO app and from the openHAB Grundfos Alpha binding, and a real ALPHA3
+/// acknowledged and stored such SETs.
+uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
+                        std::span<const uint8_t> body);
 
 /// One APDU; data points into the frame.
 struct Apdu {
