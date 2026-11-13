@@ -23,6 +23,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
 #include "esphome/components/button/button.h"
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+#include "esphome/components/time/real_time_clock.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -119,7 +122,17 @@ struct WriteRequest {
   Command command;
 };
 
+enum class ClockPhase : uint8_t {
+  CLOCK_PHASE_NONE,
+  CLOCK_PHASE_CHECK,    // 94/101 is read to compare the pump's clock with the time source
+  CLOCK_PHASE_READ,     // 94/100 is read before it is written
+  CLOCK_PHASE_WRITE,    // 94/100 is written with the local time
+  CLOCK_PHASE_VERIFY,   // 94/100 is read back
+  CLOCK_PHASE_RECHECK,  // 94/101 is read again to see that the clock took the time
+};
+
 /// The objects read from a pump of one unit family, type and version; settings is null for a model without them.
+/// has_clock: the pump has the clock objects 94/100 and 94/101 in the layout of profile 52_1_0.
 struct Model {
   uint8_t family;
   uint8_t type;
@@ -127,9 +140,11 @@ struct Model {
   uint8_t name;  // index into ModelNames
   std::span<const ObjectLayout> objects;
   const SettingLayouts *settings;
+  bool has_clock;
 };
 
 // Values of current_ besides a step of the poll chain
+static constexpr uint8_t REQUEST_CLOCK = 0xFC;
 static constexpr uint8_t REQUEST_WRITE = 0xFD;
 static constexpr uint8_t REQUEST_IDENTITY = 0xFE;
 static constexpr uint8_t REQUEST_NONE = 0xFF;
@@ -156,6 +171,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   SUB_BUTTON(stop)
   SUB_BUTTON(reset_alarm)
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_CLOCK) && defined(USE_SENSOR)
+  SUB_SENSOR(clock_deviation)
+#endif
 
  public:
   void update() override;
@@ -180,6 +198,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   void send_command(Command command);
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  void set_time_id(time::RealTimeClock *time) { this->time_ = time; }
 #endif
 
  protected:
@@ -218,6 +239,15 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   /// Why the job must not start now, or nullptr when it may.
   const LogString *job_refusal_() const;
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  /// Start the clock check when it is due and the time source is valid; false when it was not started.
+  bool start_clock_();
+  void continue_clock_(const genibus::GenibusResponse &response);
+  /// The pump's clock in 94/101 minus the local time of the time source, in seconds; false when the reply holds no
+  /// valid time.
+  bool clock_deviation_(const genibus::GenibusResponse &response, int32_t &deviation);
+  void end_clock_(const LogString *failure);
+#endif
   void publish_(Reading reading, float value);
   void publish_unknown_();
   bool first_warning_(uint8_t bit);
@@ -255,6 +285,13 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool reply_failed_{false};  // the last reply was an error, so a late answer may still come
   // The status warning is a failed write; it clears at the first valid settings read of a later poll cycle
   WriteWarning write_warning_{WriteWarning::WRITE_WARNING_NONE};
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  time::RealTimeClock *time_{nullptr};
+  uint32_t clock_checked_at_{0};
+  std::array<uint8_t, 10> clock_body_{};  // 94/100 as written
+  ClockPhase clock_phase_{ClockPhase::CLOCK_PHASE_NONE};
+  bool clock_due_{true};  // check at the first update with a valid time after a connection
 #endif
 };
 
