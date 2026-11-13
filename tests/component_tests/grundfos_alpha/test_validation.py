@@ -2,18 +2,29 @@
 
 import pytest
 
-from esphome import config_validation as cv
-from esphome.components.grundfos_alpha import CONFIG_SCHEMA, validate_update_interval
+from esphome import config_validation as cv, final_validate as fv
+from esphome.components.grundfos_alpha import (
+    CONF_GRUNDFOS_ALPHA_ID,
+    CONFIG_SCHEMA,
+    validate_update_interval,
+)
+from esphome.components.grundfos_alpha.sensor import (
+    FINAL_VALIDATE_SCHEMA as sensor_final_validate,
+)
 from esphome.components.grundfos_alpha.switch import (
     CONF_AUTOMATIC_NIGHT_SETBACK,
     CONFIG_SCHEMA as SWITCH_SCHEMA,
 )
+from esphome.config import Config
 from esphome.const import (
+    CONF_ID,
     CONF_INITIAL_STATE,
     CONF_RESTORE_MODE,
     CONF_RESTORE_STATE,
+    CONF_TIME_ID,
     CONF_UPDATE_INTERVAL,
 )
+from esphome.core import ID
 
 
 @pytest.mark.parametrize("value", ["5s", "30s", "10min"])
@@ -57,3 +68,32 @@ def test_switch_does_not_restore() -> None:
     schema = SWITCH_SCHEMA.schema[CONF_AUTOMATIC_NIGHT_SETBACK]
     config = schema({"name": "Night setback"})
     assert str(config[CONF_RESTORE_MODE]) == "DISABLED"
+
+
+def _set_hub(hub: dict) -> None:
+    full_config = Config()
+    full_config.update({"grundfos_alpha": [hub]})
+    full_config.declare_ids.append((hub[CONF_ID], ["grundfos_alpha", 0, CONF_ID]))
+    fv.full_config.set(full_config)
+
+
+def _sensors(**extra: object) -> dict:
+    return {CONF_GRUNDFOS_ALPHA_ID: ID("pump"), **extra}
+
+
+def test_clock_deviation_needs_the_time_id() -> None:
+    _set_hub({CONF_ID: ID("pump", is_declaration=True)})
+    with pytest.raises(cv.Invalid, match="time_id"):
+        sensor_final_validate(_sensors(clock_deviation={}))
+
+
+def test_clock_deviation_with_the_time_id_is_accepted() -> None:
+    _set_hub({CONF_ID: ID("pump", is_declaration=True), CONF_TIME_ID: ID("clock")})
+    config = _sensors(clock_deviation={})
+    assert sensor_final_validate(config) is config
+
+
+def test_sensors_without_clock_deviation_need_no_time_id() -> None:
+    _set_hub({CONF_ID: ID("pump", is_declaration=True)})
+    config = _sensors(flow={})
+    assert sensor_final_validate(config) is config

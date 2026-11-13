@@ -1,8 +1,11 @@
 #include "grundfos_alpha.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cmath>
+#include <cstdlib>
 
+#include "esphome/core/application.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/progmem.h"
@@ -103,7 +106,7 @@ static_assert(static_cast<size_t>(Setting::SETTING_COUNT) <= 16, "last_known_ ha
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
 // Add a model only after it was tested on a real pump
 static constexpr Model MODELS[] = {
-    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS, true},
+    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS, true, true},
 };
 
 // missing_ and warned_ keep a bit per object index
@@ -163,9 +166,6 @@ static constexpr uint8_t CONTROL_MODES[] = {0, 1, 2, 13, 14, 15};
 static constexpr uint8_t OPERATING_MODES[] = {0, 1, 2, 3};
 // The class 5 ID of air venting (temporary_operation_control): 1 starts it, 0 stops it
 static constexpr uint8_t REFERENCE_AIR_VENTING = 75;
-// Status byte of a class 10 SET acknowledgement
-static constexpr uint8_t SET_STATUS_BUSY = 2;
-static constexpr uint8_t SET_STATUS_FAILED = 4;
 #endif
 
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
@@ -268,6 +268,50 @@ PROGMEM_STRING_TABLE(EventNames, "Event", "Alarm appeared", "Alarm cleared", "Wa
 #endif
 #endif
 
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) || defined(USE_GRUNDFOS_ALPHA_CLOCK)
+// Status byte of a class 10 SET acknowledgement
+static constexpr uint8_t SET_STATUS_BUSY = 2;
+static constexpr uint8_t SET_STATUS_FAILED = 4;
+#endif
+
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+// Clock objects of profile 52_1_0, measured on an ALPHA3. 94/100 type 0x0141 v1: sync_enabled, year (u16), month,
+// day, hour, minute, second, 1/100 s, hour_format, in local time; a write sets the clock. 94/101 type 0x0142 v1: the
+// pump's local time in the same order, then weekday, day type and daylight saving status. 94/102, the daylight saving
+// rule, is never written: a single byte of it clears the whole rule.
+static constexpr uint8_t CLOCK_OBJECT = 94;
+static constexpr uint16_t CLOCK_CONFIG_SUB_ID = 100;
+static constexpr uint16_t CLOCK_CONFIG_TYPE = 0x0141;
+static constexpr uint16_t CLOCK_ACTUAL_SUB_ID = 101;
+static constexpr uint16_t CLOCK_ACTUAL_TYPE = 0x0142;
+static constexpr uint8_t CLOCK_VERSION = 1;
+static constexpr uint8_t CLOCK_CONFIG_SIZE = 10;
+static constexpr uint8_t CLOCK_ACTUAL_SIZE = 12;
+static constexpr uint8_t OFFSET_SYNC = 0;         // 94/100
+static constexpr uint8_t OFFSET_HOUR_FORMAT = 9;  // 94/100; 0 is 24 h
+static constexpr uint32_t CLOCK_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// After a check or write that got no valid answer, or a busy pump
+static constexpr uint32_t CLOCK_RETRY_MS = 60 * 60 * 1000;
+// The time source has whole seconds; a smaller deviation is not worth a write to the pump's memory
+static constexpr int32_t CLOCK_TOLERANCE_S = 2;
+
+/// The class 10 object in a reply with status 0, when it has the given type, version 1 and size.
+static bool parse_clock(const genibus::GenibusResponse &response, uint16_t type, uint8_t size,
+                        genibus::DataObject &object) {
+  genibus::ApduReader reader(response.apdus);
+  genibus::Apdu apdu{};
+  return response.error == GenibusError::GENIBUS_ERROR_NONE && reader.next(apdu) &&
+         apdu.data_class == genibus::CLASS_DATA_OBJECT && genibus::parse_data_object(apdu, object) &&
+         object.status == 0 && object.type == type && object.version == CLOCK_VERSION && object.body.size() == size;
+}
+
+/// Local calendar fields as seconds on one scale, to compare two local times.
+static time_t local_seconds(ESPTime time) {
+  time.recalc_timestamp_utc(false);
+  return time.timestamp;
+}
+#endif
+
 void GrundfosAlpha::dump_config() {
   ESP_LOGCONFIG(TAG, "Grundfos ALPHA:\n  Address: 0x%02X", this->address_);
   LOG_UPDATE_INTERVAL(this);
@@ -317,6 +361,12 @@ void GrundfosAlpha::dump_config() {
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
   LOG_SWITCH("  ", "Automatic night setback", this->automatic_night_setback_switch_);
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  ESP_LOGCONFIG(TAG, "  Sets the pump's clock from the time source");
+#ifdef USE_SENSOR
+  LOG_SENSOR("  ", "Clock deviation", this->clock_deviation_sensor_);
+#endif
+#endif
 }
 
 void GrundfosAlpha::update() {
@@ -346,6 +396,10 @@ void GrundfosAlpha::update() {
   if (this->start_job_())
     return;
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  if (this->start_clock_())
+    return;
+#endif
   this->request_from_(0);
 }
 
@@ -362,9 +416,20 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
     return;
   }
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  if (current == REQUEST_CLOCK) {
+    this->continue_clock_(response);
+    return;
+  }
+#endif
   if (current == REQUEST_IDENTITY) {
-    if (this->identify_(response))
-      this->request_from_(0);
+    if (!this->identify_(response))
+      return;
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+    if (this->start_clock_())
+      return;
+#endif
+    this->request_from_(0);
     return;
   }
   if (this->model_ == nullptr)
@@ -405,6 +470,11 @@ void GrundfosAlpha::on_connected() {
 
 void GrundfosAlpha::on_disconnected() {
   this->publish_unknown_();
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  // The pump may have lost its clock with its power; check again after the next connection
+  this->clock_phase_ = ClockPhase::CLOCK_PHASE_NONE;
+  this->clock_due_ = true;
+#endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   // Empty, as ble_client text sensors show a lost connection. The product texts stay: they are read again after the
   // pump comes back, which happens several times a day when the heating cuts its power.
@@ -1200,6 +1270,212 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
   }
   this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
   this->status_set_warning(LOG_STR("Write failed"));
+}
+#endif
+
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+bool GrundfosAlpha::start_clock_() {
+  if (this->time_ == nullptr || this->model_ == nullptr || !this->model_->has_clock ||
+      this->clock_phase_ != ClockPhase::CLOCK_PHASE_NONE)
+    return false;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  if (this->phase_ != JobPhase::JOB_PHASE_NONE)
+    return false;
+#endif
+  if (!this->clock_due_ && App.get_loop_component_start_time() - this->clock_checked_at_ < CLOCK_CHECK_INTERVAL_MS)
+    return false;
+  // Never set the pump's clock from a time source that has no time yet
+  if (!this->time_->now().is_valid(false, false))
+    return false;
+  if (!this->request_object_(CLOCK_OBJECT, CLOCK_ACTUAL_SUB_ID))
+    return false;
+  this->clock_phase_ = ClockPhase::CLOCK_PHASE_CHECK;
+  this->current_ = REQUEST_CLOCK;
+  return true;
+}
+
+bool GrundfosAlpha::clock_deviation_(const genibus::GenibusResponse &response, int32_t &deviation) {
+  genibus::DataObject object{};
+  if (!parse_clock(response, CLOCK_ACTUAL_TYPE, CLOCK_ACTUAL_SIZE, object))
+    return false;
+  const auto &body = object.body;
+  ESPTime pump{};
+  pump.year = encode_uint16(body[0], body[1]);
+  pump.month = body[2];
+  pump.day_of_month = body[3];
+  pump.hour = body[4];
+  pump.minute = body[5];
+  pump.second = body[6];
+  const ESPTime now = this->time_->now();
+  if (!pump.fields_in_range(false, false) || !now.is_valid(false, false))
+    return false;
+  deviation = static_cast<int32_t>(local_seconds(pump) - local_seconds(now));
+  return true;
+}
+
+void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
+  genibus::DataObject object{};
+  int32_t deviation = 0;
+  const LogString *failure = nullptr;
+  bool done = false;
+  bool block = false;  // the pump answered the write; the same write would only repeat
+  switch (this->clock_phase_) {
+    case ClockPhase::CLOCK_PHASE_CHECK: {
+      if (!this->clock_deviation_(response, deviation)) {
+        failure = LOG_STR("no valid time in 94/101");
+        break;
+      }
+#ifdef USE_SENSOR
+      PUBLISH_STATE(this->clock_deviation_sensor_, static_cast<float>(deviation));
+#endif
+      if (std::abs(deviation) < CLOCK_TOLERANCE_S) {
+        done = true;
+        break;
+      }
+      if (this->clock_write_blocked_) {
+        ESP_LOGD(TAG, "Pump clock is %" PRId32 " s off; not set again until restart", deviation);
+        done = true;
+        break;
+      }
+      ESP_LOGD(TAG, "Pump clock is %" PRId32 " s off; setting it", deviation);
+      this->clock_phase_ = ClockPhase::CLOCK_PHASE_READ;
+      if (!this->request_object_(CLOCK_OBJECT, CLOCK_CONFIG_SUB_ID)) {
+        failure = LOG_STR("not sent");
+        break;
+      }
+      this->current_ = REQUEST_CLOCK;
+      return;
+    }
+    case ClockPhase::CLOCK_PHASE_READ: {
+      const ESPTime now = this->time_->now();
+      if (!parse_clock(response, CLOCK_CONFIG_TYPE, CLOCK_CONFIG_SIZE, object)) {
+        failure = LOG_STR("no valid read of 94/100");
+        break;
+      }
+      if (!now.is_valid(false, false)) {
+        failure = LOG_STR("no valid time");
+        break;
+      }
+      // Only the time changes, and it is always the current time: written back unchanged, an old time in the object
+      // would set the clock back
+      auto &body = this->clock_body_;
+      body[OFFSET_SYNC] = object.body[OFFSET_SYNC];
+      put_be16(&body[1], now.year);
+      body[3] = now.month;
+      body[4] = now.day_of_month;
+      body[5] = now.hour;
+      body[6] = now.minute;
+      body[7] = now.second;
+      body[8] = 0;
+      // The pump refuses 12 h (1), but 94/100 can still show it after the refusal; 24 h is the only valid value
+      body[OFFSET_HOUR_FORMAT] = 0;
+      this->clock_phase_ = ClockPhase::CLOCK_PHASE_WRITE;
+      if (!this->set_object_(CLOCK_OBJECT, CLOCK_CONFIG_SUB_ID, CLOCK_CONFIG_TYPE, CLOCK_VERSION, body)) {
+        failure = LOG_STR("not sent");
+        break;
+      }
+      this->current_ = REQUEST_CLOCK;
+      return;
+    }
+    case ClockPhase::CLOCK_PHASE_WRITE: {
+      genibus::ApduReader reader(response.apdus);
+      genibus::Apdu apdu{};
+      if (response.error != GenibusError::GENIBUS_ERROR_NONE) {
+        failure = LOG_STR("no reply");
+        break;
+      }
+      if (!reader.next(apdu) || apdu.data_class != genibus::CLASS_DATA_OBJECT || apdu.ack != 0 ||
+          apdu.data.size() != 1) {
+        ESP_LOGV(TAG, "Clock write reply: class %u, ACK %u, %u bytes", apdu.data_class, apdu.ack,
+                 static_cast<unsigned>(apdu.data.size()));
+        failure = LOG_STR("refused");
+        block = true;
+        break;
+      }
+      if (apdu.data[0] != 0) {
+        ESP_LOGV(TAG, "Clock write status %u", apdu.data[0]);
+        // A busy pump may take the same write later; any other status refuses it again
+        block = apdu.data[0] != SET_STATUS_BUSY;
+        failure = block ? (apdu.data[0] == SET_STATUS_FAILED ? LOG_STR("operation failed") : LOG_STR("refused"))
+                        : LOG_STR("pump busy");
+        break;
+      }
+      this->clock_phase_ = ClockPhase::CLOCK_PHASE_VERIFY;
+      if (!this->request_object_(CLOCK_OBJECT, CLOCK_CONFIG_SUB_ID)) {
+        failure = LOG_STR("read-back not sent");
+        break;
+      }
+      this->current_ = REQUEST_CLOCK;
+      return;
+    }
+    case ClockPhase::CLOCK_PHASE_VERIFY: {
+      if (!parse_clock(response, CLOCK_CONFIG_TYPE, CLOCK_CONFIG_SIZE, object)) {
+        failure = LOG_STR("no valid read-back");
+        break;
+      }
+      if (!std::equal(object.body.begin(), object.body.end(), this->clock_body_.begin())) {
+        failure = LOG_STR("the read-back differs");
+        block = true;
+        break;
+      }
+      this->clock_phase_ = ClockPhase::CLOCK_PHASE_RECHECK;
+      if (!this->request_object_(CLOCK_OBJECT, CLOCK_ACTUAL_SUB_ID)) {
+        failure = LOG_STR("check not sent");
+        break;
+      }
+      this->current_ = REQUEST_CLOCK;
+      return;
+    }
+    case ClockPhase::CLOCK_PHASE_RECHECK: {
+      if (!this->clock_deviation_(response, deviation)) {
+        failure = LOG_STR("no valid time in 94/101 after the write");
+        break;
+      }
+#ifdef USE_SENSOR
+      PUBLISH_STATE(this->clock_deviation_sensor_, static_cast<float>(deviation));
+#endif
+      // For example a daylight saving rule in the pump that does not match the time source
+      if (std::abs(deviation) >= CLOCK_TOLERANCE_S) {
+        failure = LOG_STR("the clock did not take the time");
+        block = true;
+        break;
+      }
+      done = true;
+      break;
+    }
+    default:
+      return;
+  }
+  if (done || failure != nullptr)
+    this->end_clock_(failure, block);
+  // After a failed reply a late answer may still come; the next update() goes on
+  if (response.error != GenibusError::GENIBUS_ERROR_NONE || !this->parent_->is_connected())
+    return;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
+  if (this->start_job_())
+    return;
+#endif
+  this->request_from_(0);
+}
+
+void GrundfosAlpha::end_clock_(const LogString *failure, bool block_writes) {
+  this->clock_phase_ = ClockPhase::CLOCK_PHASE_NONE;
+  this->clock_due_ = false;
+  this->clock_checked_at_ = App.get_loop_component_start_time();
+  if (failure == nullptr) {
+    ESP_LOGV(TAG, "Pump clock checked");
+    return;
+  }
+  // Only a log line: the clock does not affect the pumping
+  if (block_writes) {
+    // Writing again would wear the pump's memory, for example each hour all summer for an unknown daylight saving
+    // rule; the checks go on
+    this->clock_write_blocked_ = true;
+    ESP_LOGW(TAG, "Setting the pump clock failed: %s; not set again until restart", LOG_STR_ARG(failure));
+    return;
+  }
+  ESP_LOGW(TAG, "Setting the pump clock failed: %s", LOG_STR_ARG(failure));
+  this->clock_checked_at_ -= CLOCK_CHECK_INTERVAL_MS - CLOCK_RETRY_MS;
 }
 #endif
 
