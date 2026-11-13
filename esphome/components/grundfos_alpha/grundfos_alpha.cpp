@@ -34,6 +34,8 @@ static constexpr size_t APDU_HEADER_SIZE = 2;
 static constexpr float PASCAL_PER_METER = 9804.0f;
 static constexpr float SECONDS_PER_HOUR = 3600.0f;
 static constexpr float WATT_SECONDS_PER_KILOWATT_HOUR = 3.6e6f;
+// A 93/1 counter that falls to less than this share of its highest value was reset; a real ALPHA3 lost about an hour
+static constexpr float COUNTER_HOLD_SHARE = 0.9f;
 
 // Object layouts and field names from the Grundfos GENI profile in the Grundfos GO app 8.5.2
 // (ALPHA3 Model B: profile 52_1_0, version V01.11.00.00037). The alpha3 component reads the same requests,
@@ -56,7 +58,7 @@ static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
     {Reading::READING_SPEED, 20, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
 // 87/1, type 0x00E8 v1: system_energy (double, Ws), system_power, then a counted list of one entry per pump.
-// Whether system_energy also falls back after a power cut is not known yet; it is held like 93/1 (see publish_).
+// Whether system_energy also falls back after a power cut is not known; it is published as the pump reports it.
 static constexpr Field ALPHA3_ENERGY_FIELDS[] = {
     {Reading::READING_ENERGY, 0, FieldFormat::FIELD_FORMAT_DOUBLE, 1.0f / WATT_SECONDS_PER_KILOWATT_HOUR},
 };
@@ -127,6 +129,24 @@ static constexpr bool objects_fit_bits() {
 }
 static_assert(objects_fit_bits(), "A model has more objects than missing_ and warned_ have bits");
 
+// current_ holds one of these and batch_ the steps of the poll chain; no value may stand for two things
+static constexpr uint8_t REQUESTS[] = {REQUEST_CLOCK, REQUEST_POLL, REQUEST_WRITE, REQUEST_IDENTITY, REQUEST_NONE};
+static constexpr bool requests_are_distinct() {
+  constexpr size_t steps = static_cast<size_t>(Setting::SETTING_COUNT) + static_cast<size_t>(InfoStep::INFO_STEP_COUNT);
+  for (size_t i = 0; i < std::size(REQUESTS); i++) {
+    for (size_t j = i + 1; j < std::size(REQUESTS); j++) {
+      if (REQUESTS[i] == REQUESTS[j])
+        return false;
+    }
+    for (const auto &model : MODELS) {
+      if (REQUESTS[i] < model.objects.size() + steps)
+        return false;
+    }
+  }
+  return true;
+}
+static_assert(requests_are_distinct(), "Two REQUEST_ values are equal or one is a step of the poll chain");
+
 static float read_float(const uint8_t *at) { return bit_cast<float>(encode_uint32(at[0], at[1], at[2], at[3])); }
 
 /// The field in body, or NAN when the body is too short for it.
@@ -183,6 +203,7 @@ static constexpr uint8_t REFERENCE_AIR_VENTING = 75;
 
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_NUMBER)
 static constexpr uint8_t OFFSET_SET_POINT = 2;  // 0x012E local_set_point
+static constexpr uint8_t OFFSET_DEFAULT = 0;    // 0x012D default set point
 static constexpr uint8_t OFFSET_MIN = 4;        // 0x012D minimum set point
 static constexpr uint8_t OFFSET_MAX = 8;        // 0x012D maximum set point
 
@@ -236,7 +257,7 @@ static constexpr uint8_t OFFSET_CLOCK_PROGRAM_ENABLED = 4;
 #endif
 
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
-/// The bits of last_known_ for the set point limits, which do not change.
+/// The bits of last_known_ for the set point limits, which do not change while the pump is connected.
 static constexpr uint32_t limit_bits() {
   uint32_t bits = 0;
 #ifdef USE_NUMBER
@@ -397,7 +418,9 @@ void GrundfosAlpha::dump_config() {
   LOG_SWITCH("  ", "Clock program", this->clock_program_switch_);
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
-  ESP_LOGCONFIG(TAG, "  Sets the pump's clock from the time source");
+  ESP_LOGCONFIG(TAG, "  Pump clock: %s",
+                this->clock_writes_ ? LOG_STR_LITERAL("checked and set from the time source")
+                                    : LOG_STR_LITERAL("checked against the time source"));
 #ifdef USE_SENSOR
   LOG_SENSOR("  ", "Clock deviation", this->clock_deviation_sensor_);
 #endif
@@ -417,8 +440,9 @@ void GrundfosAlpha::update() {
       this->current_ = REQUEST_IDENTITY;
     return;
   }
-#ifdef USE_GRUNDFOS_ALPHA_WRITE
   // A new poll cycle: a late answer to an old request can no longer come
+  this->late_reply_possible_ = false;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
   this->reply_failed_ = false;
   if (this->write_warning_ == WriteWarning::WRITE_WARNING_SET) {
     // The first valid settings read of this cycle clears it; with no settings to read, the new cycle does
@@ -428,6 +452,7 @@ void GrundfosAlpha::update() {
       this->status_clear_warning();
     }
   }
+  this->drop_stuck_write_();
   if (this->start_job_())
     return;
 #endif
@@ -453,6 +478,10 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
     ESP_LOGD(TAG, "Reply does not have the %u APDUs of the request", static_cast<unsigned>(apdus));
     checked = {GenibusError::GENIBUS_ERROR_MALFORMED, {}};
   }
+  const bool miscounted = response.error == GenibusError::GENIBUS_ERROR_NONE && checked.error != response.error;
+  if (checked.error != GenibusError::GENIBUS_ERROR_NONE)
+    this->late_reply_possible_ = true;
+  this->stray_reply_ = false;
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   this->reply_failed_ = checked.error != GenibusError::GENIBUS_ERROR_NONE;
   if (current == REQUEST_WRITE) {
@@ -467,13 +496,8 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
   }
 #endif
   if (current == REQUEST_IDENTITY) {
-    if (!this->identify_(checked))
-      return;
-#ifdef USE_GRUNDFOS_ALPHA_CLOCK
-    if (this->start_clock_())
-      return;
-#endif
-    this->request_from_(0);
+    if (this->identify_(checked))
+      this->request_from_(0);
     return;
   }
   if (current != REQUEST_POLL || this->model_ == nullptr)
@@ -503,6 +527,12 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
 #endif
     }
   }
+  // A late answer shifts each later reply of the chain by one request. Without the rest of the chain no request waits
+  // for the reply still on its way, so the bus drops it; the next update starts the chain again.
+  if (miscounted || (this->stray_reply_ && this->late_reply_possible_)) {
+    ESP_LOGD(TAG, "Reply may be the late answer to an earlier request; poll chain stopped until the next update");
+    return;
+  }
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   // A write goes before the rest of the poll chain, but not right after a failed reply
   if (!this->reply_failed_ && this->start_job_())
@@ -514,6 +544,9 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
 void GrundfosAlpha::on_connected() {
   this->missing_ = 0;
   this->single_ = false;
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  this->clock_polled_ = false;
+#endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   this->texts_read_ = 0;
   this->texts_retried_ = 0;
@@ -529,6 +562,9 @@ void GrundfosAlpha::on_disconnected() {
   // The pump may have lost its clock with its power; check again after the next connection
   this->clock_phase_ = ClockPhase::CLOCK_PHASE_NONE;
   this->clock_due_ = true;
+#ifdef USE_SENSOR
+  PUBLISH_STATE(this->clock_deviation_sensor_, NAN);
+#endif
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   // Empty, as ble_client text sensors show a lost connection. The product texts stay: they are read again after the
@@ -549,8 +585,8 @@ void GrundfosAlpha::on_disconnected() {
     this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
     this->status_set_warning(LOG_STR("Write failed"));
   }
-  // The pump may change while away; a write waits for the next poll
-  this->last_known_ &= LIMIT_BITS;
+  // The pump may change while away, or be another pump; a write waits for the next poll, and the limits are read again
+  this->last_known_ = 0;
 #ifdef USE_NUMBER
   for (auto *entity : this->numbers_) {
     if (entity != nullptr && entity->has_state())
@@ -605,8 +641,9 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
       ESP_LOGW(TAG, "The pump has no object %u/%u; its sensors stay unknown", layout.object, layout.sub_id);
     }
   } else if (!ok && response.error == GenibusError::GENIBUS_ERROR_NONE) {
-#ifdef USE_GRUNDFOS_ALPHA_WRITE
     // Maybe the late answer to another request, which a write must not follow
+    this->stray_reply_ = true;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
     this->reply_failed_ = true;
 #endif
     // Never read offsets from another version of the object
@@ -687,7 +724,14 @@ void GrundfosAlpha::request_from_(size_t step) {
       break;
 #endif
   }
-  if (count != 0 && this->request_objects_({ids.data(), count})) {
+  if (count == 0) {
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+    // The poll chain is done: the clock check may follow from the next update on
+    this->clock_polled_ = true;
+#endif
+    return;
+  }
+  if (this->request_objects_({ids.data(), count})) {
     this->batch_size_ = count;
     this->current_ = REQUEST_POLL;
   }
@@ -705,13 +749,15 @@ bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
 
 void GrundfosAlpha::publish_(Reading reading, float value) {
 #ifdef USE_SENSOR
-  // A counter that falls back after a power cut keeps its highest value until it passes it again, so that
-  // total_increasing sensors do not go down. A restart of the ESP forgets the highest values.
-  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_ENERGY);
+  // A 93/1 counter that falls back a little after a power cut keeps its highest value until it passes it again, so
+  // that total_increasing sensors do not go down. A larger fall, such as another pump or a factory reset, is
+  // published as it is. A restart of the ESP forgets the highest values.
+  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_OPERATING_HOURS);
   if (total < this->totals_.size() && !std::isnan(value)) {
-    if (value < this->totals_[total])
-      value = this->totals_[total];
-    this->totals_[total] = value;
+    float &held = this->totals_[total];
+    if (value < held && value >= held * COUNTER_HOLD_SHARE)
+      value = held;
+    held = value;
   }
   PUBLISH_STATE(this->sensor_(reading), value);
 #endif
@@ -812,11 +858,13 @@ bool GrundfosAlpha::parse_setting_(Setting setting, const genibus::GenibusRespon
                   object.version == layout.version && object.body.size() == layout.size;
   if (ok)
     return true;
-#ifdef USE_GRUNDFOS_ALPHA_WRITE
   // Maybe the late answer to another request, which a write must not follow
-  if (!genibus::is_object_missing(apdu))
+  if (!genibus::is_object_missing(apdu)) {
+    this->stray_reply_ = true;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
     this->reply_failed_ = true;
 #endif
+  }
   if (this->first_warning_(WARNED_SETTING)) {
     ESP_LOGW(TAG, "Unexpected reply to object %u/%u: class %u, ACK %u, status %u, type 0x%04X v%u, %u bytes",
              layout.object, layout.sub_id, apdu.data_class, apdu.ack, object.status, object.type, object.version,
@@ -879,8 +927,19 @@ void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> b
     if (NUMBERS[i].value == setting) {
       PUBLISH_STATE(this->numbers_[i], read_float(&body[OFFSET_SET_POINT]) / NUMBERS[i].raw_per_unit);
     } else if (NUMBERS[i].limits == setting) {
+      const float fallback = read_float(&body[OFFSET_DEFAULT]);
       this->min_[i] = read_float(&body[OFFSET_MIN]);
       this->max_[i] = read_float(&body[OFFSET_MAX]);
+      // All limits objects have the same type, so only their values can show a broken or misplaced reply
+      if (!(this->min_[i] < this->max_[i] && fallback >= this->min_[i] && fallback <= this->max_[i])) {
+        if (this->first_warning_(WARNED_SETTING)) {
+          ESP_LOGW(TAG, "Implausible limits in 86/%u: default %.0f, %.0f to %.0f",
+                   (*this->model_->settings)[index].sub_id, fallback, this->min_[i], this->max_[i]);
+        }
+        this->min_[i] = NAN;
+        this->max_[i] = NAN;
+        this->last_known_ &= ~(1u << index);
+      }
     }
   }
   if (setting == Setting::SETTING_PUMP_KICK) {
@@ -956,6 +1015,7 @@ void GrundfosAlpha::decode_info_(InfoStep step, const genibus::GenibusResponse &
   // A text the pump refuses (an ACK) or sends in another form is not asked for again until the next connection. A
   // reply of another class or an implausible text may be a late reply to an earlier request: asked for once more.
   const bool late = !replied || apdu.data_class != genibus::CLASS_ASCII || (apdu.ack == 0 && !text.empty());
+  this->stray_reply_ |= late;
   if (!late || (this->texts_retried_ & bit) != 0)
     this->texts_read_ |= bit;
   this->texts_retried_ |= bit;
@@ -977,11 +1037,13 @@ bool GrundfosAlpha::parse_event_object_(const genibus::GenibusResponse &response
   if (replied && genibus::parse_data_object(apdu, object) && object.status == 0 && object.type == type &&
       object.version == 1 && object.body.size() == size)
     return true;
-#ifdef USE_GRUNDFOS_ALPHA_WRITE
   // Maybe the late answer to another request, which a write must not follow
-  if (!replied || !genibus::is_object_missing(apdu))
+  if (!replied || !genibus::is_object_missing(apdu)) {
+    this->stray_reply_ = true;
+#ifdef USE_GRUNDFOS_ALPHA_WRITE
     this->reply_failed_ = true;
 #endif
+  }
   if (replied && genibus::is_object_missing(apdu)) {
     // Not asked for again until the next connection
     this->event_log_missing_ = true;
@@ -1171,11 +1233,29 @@ void GrundfosAlpha::write_air_venting(bool on) {
   this->enqueue_({Setting::SETTING_COUNT, 0, 0, on, Command::COMMAND_AIR_VENTING}, LOG_STR("Air venting"));
 }
 
+void GrundfosAlpha::drop_stuck_write_() {
+  if (this->queued_ == 0 || this->phase_ != JobPhase::JOB_PHASE_NONE || this->job_ready_(this->queue_[0])) {
+    this->waited_ = 0;
+    return;
+  }
+  // An object that never has a valid read, for example after a firmware update, would block the writes behind it
+  if (++this->waited_ < WRITE_WAIT_CYCLES)
+    return;
+  this->waited_ = 0;
+  const SettingLayout &layout = (*this->model_->settings)[static_cast<size_t>(this->queue_[0].setting)];
+  ESP_LOGW(TAG, "Write to %u/%u dropped: no valid read of the object", layout.object, layout.sub_id);
+  std::copy(this->queue_.begin() + 1, this->queue_.begin() + this->queued_, this->queue_.begin());
+  this->queued_--;
+  this->write_warning_ = WriteWarning::WRITE_WARNING_SET;
+  this->status_set_warning(LOG_STR("Write failed"));
+}
+
 bool GrundfosAlpha::start_job_() {
   if (this->phase_ != JobPhase::JOB_PHASE_NONE || this->model_ == nullptr || this->model_->settings == nullptr)
     return false;
   while (this->queued_ != 0) {
-    // A write waits until its object was polled; the read before the write is checked against that poll
+    // A write waits until its object was polled; the read before the write is checked against that poll. A command
+    // never goes past a waiting write: a stop after a write of Max must not end up running the pump at Max.
     if (!this->job_ready_(this->queue_[0]))
       return false;
     this->job_ = this->queue_[0];
@@ -1448,7 +1528,8 @@ void GrundfosAlpha::end_job_(const LogString *failure) {
 
 #ifdef USE_GRUNDFOS_ALPHA_CLOCK
 bool GrundfosAlpha::start_clock_() {
-  if (this->time_ == nullptr || this->model_ == nullptr || !this->model_->has_clock ||
+  // Not before the first poll after a connection, which the entities need first
+  if (this->time_ == nullptr || this->model_ == nullptr || !this->model_->has_clock || !this->clock_polled_ ||
       this->clock_phase_ != ClockPhase::CLOCK_PHASE_NONE)
     return false;
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
@@ -1502,6 +1583,11 @@ void GrundfosAlpha::continue_clock_(const genibus::GenibusResponse &response) {
       PUBLISH_STATE(this->clock_deviation_sensor_, static_cast<float>(deviation));
 #endif
       if (std::abs(deviation) < CLOCK_TOLERANCE_S) {
+        done = true;
+        break;
+      }
+      if (!this->clock_writes_) {
+        ESP_LOGD(TAG, "Pump clock is %" PRId32 " s off", deviation);
         done = true;
         break;
       }

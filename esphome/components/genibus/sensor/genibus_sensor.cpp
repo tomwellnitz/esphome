@@ -74,12 +74,11 @@ void GenibusSensor::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "  Address: 0x%02X\n"
                 "  Object: %u/%u\n"
-                "  Offset: %u",
-                this->address_, this->object_, this->sub_id_, this->offset_);
-  ESP_LOGCONFIG(TAG,
+                "  Offset: %u\n"
                 "  Expected type: 0x%04X\n"
                 "  Expected version: %u",
-                this->expected_type_, this->expected_version_);
+                this->address_, this->object_, this->sub_id_, this->offset_, this->expected_type_,
+                this->expected_version_);
   LOG_UPDATE_INTERVAL(this);
 }
 
@@ -110,15 +109,15 @@ float GenibusSensor::decode_(const GenibusResponse &response) {
     return NAN;
   }
   this->missing_replies_ = 0;
-  // Never read the offset from another type or version of the object, or past the bytes it sent
+  // Never read the offset from an object with a status, from another type or version of it, or past the bytes it sent
   const bool parsed = parse_object_prefix(apdu, object);
-  if (parsed && object.type == this->expected_type_ && object.version == this->expected_version_ &&
-      this->offset_ + value_size(this->type_) <= object.body.size())
+  if (parsed && object.status == 0 && object.type == this->expected_type_ &&
+      object.version == this->expected_version_ && this->offset_ + value_size(this->type_) <= object.body.size())
     return read_value(object.body, this->offset_, this->type_);
   if (!this->warned_unexpected_) {
     if (parsed) {
-      ESP_LOGW(TAG, "Unexpected reply to object %u/%u: type 0x%04X v%u, %u bytes", this->object_, this->sub_id_,
-               object.type, object.version, static_cast<unsigned>(object.body.size()));
+      ESP_LOGW(TAG, "Unexpected reply to object %u/%u: status %u, type 0x%04X v%u, %u bytes", this->object_,
+               this->sub_id_, object.status, object.type, object.version, static_cast<unsigned>(object.body.size()));
     } else {
       ESP_LOGW(TAG, "Unexpected reply to object %u/%u: class %u, ACK %u, %u bytes", this->object_, this->sub_id_,
                apdu.data_class, apdu.ack, static_cast<unsigned>(apdu.data.size()));
