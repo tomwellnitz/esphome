@@ -212,9 +212,9 @@ static constexpr uint8_t REQUEST_NONE = 0xFF;
 static constexpr uint32_t NO_EVENT_SHOWN = 0x10000;
 
 /// A Grundfos ALPHA circulator pump. It reads the pump's unit family, type and version once, then polls the
-/// objects of that model, several in one request: the measurements first, then the settings its entities show. A write
-/// reads the settings object, checks it against the last poll, changes one value, writes it and reads it back; writes
-/// run one at a time, each in requests of their own.
+/// objects of that model, several in one request: the measurements first, then the settings its entities show, then
+/// the texts (each alone) and the event log. A write reads the settings object, checks it against the last poll,
+/// changes one value, writes it and reads it back; writes run one at a time, each in requests of their own.
 class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_SENSOR
   SUB_SENSOR(flow)
@@ -296,7 +296,8 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool identify_(const genibus::GenibusResponse &response);
   void decode_(uint8_t index, const genibus::GenibusResponse &response);
   /// Send one request for the next wanted steps from step on, as many as fit MAX_POLL_OBJECTS and MAX_POLL_REPLY:
-  /// the measurement objects, then the settings.
+  /// the measurement objects, the settings, then the info steps. A class 7 text goes alone, and the request ends after
+  /// the event log, whose reply names the entry to read.
   void request_from_(size_t step);
   bool wants_(const ObjectLayout &layout) const;
 #ifdef USE_GRUNDFOS_ALPHA_SETTINGS
