@@ -23,6 +23,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_BUTTON)
 #include "esphome/components/button/button.h"
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+#include "esphome/components/switch/switch.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -53,7 +56,7 @@ struct ObjectLayout {
   std::span<const Field> fields;
 };
 
-/// The settings objects of group 86 the entities show, in the order they are polled after the measurements.
+/// The settings objects the entities show, in the order they are polled after the measurements.
 enum class Setting : uint8_t {
   SETTING_REALIZED,  // 86/8: the operating mode and control source in effect
   SETTING_CONTROL_MODE,
@@ -64,11 +67,14 @@ enum class Setting : uint8_t {
   SETTING_PROPORTIONAL_PRESSURE,
   SETTING_CONSTANT_SPEED_LIMITS,
   SETTING_CONSTANT_SPEED,
+  SETTING_PUMP_KICK,      // 86/2: the automatic test run of a pump that stood still
+  SETTING_CLOCK_PROGRAM,  // 84/1: the clock program overview
   SETTING_COUNT,
 };
 
-/// A settings object (object 86) as one model sends it.
+/// A settings object as one model sends it.
 struct SettingLayout {
+  uint8_t object;
   uint16_t sub_id;
   uint16_t type;
   uint8_t version;
@@ -81,8 +87,12 @@ enum class NumberSetting : uint8_t {
   NUMBER_SETTING_CONSTANT_PRESSURE,
   NUMBER_SETTING_PROPORTIONAL_PRESSURE,
   NUMBER_SETTING_CONSTANT_SPEED,
+  NUMBER_SETTING_PUMP_KICK_WAIT,  // the set points with limits from the pump come before it
+  NUMBER_SETTING_PUMP_KICK_DURATION,
   NUMBER_SETTING_COUNT,
 };
+static constexpr size_t SET_POINT_COUNT = static_cast<size_t>(NumberSetting::NUMBER_SETTING_PUMP_KICK_WAIT);
+enum class SwitchSetting : uint8_t { SWITCH_SETTING_PUMP_KICK, SWITCH_SETTING_CLOCK_PROGRAM, SWITCH_SETTING_COUNT };
 
 enum class JobPhase : uint8_t {
   JOB_PHASE_NONE,
@@ -108,14 +118,16 @@ static constexpr size_t WRITE_QUEUE_SIZE = 4;
 
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
-/// One write: change one byte or one big-endian float of a settings object, or send a command (setting is then
+// WriteRequest::width of a bool: only bit 0 of the byte changes
+static constexpr uint8_t WIDTH_BIT = 0;
+
+/// One write: change one big-endian value or one bool of a settings object, or send a command (setting is then
 /// SETTING_COUNT).
 struct WriteRequest {
   Setting setting;
   uint8_t offset;  // of the value in the body
-  uint8_t byte_value;
-  bool is_float;
-  float float_value;
+  uint8_t width;   // bytes of the value, or WIDTH_BIT
+  uint32_t value;  // a float as its bits
   Command command;
 };
 
@@ -178,6 +190,12 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   }
   void write_number(NumberSetting setting, float value);
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  void set_switch(SwitchSetting setting, switch_::Switch *entity) {
+    this->switches_[static_cast<size_t>(setting)] = entity;
+  }
+  void write_switch(SwitchSetting setting, bool state);
+#endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   void send_command(Command command);
 #endif
@@ -214,7 +232,7 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool same_outside_value_(std::span<const uint8_t> body) const;
   /// Whether a read-back confirms the write in job_body_.
   bool confirms_job_(std::span<const uint8_t> body) const;
-  uint16_t job_sub_id_() const;
+  const SettingLayout &job_layout_() const;
   /// Why the job must not start now, or nullptr when it may.
   const LogString *job_refusal_() const;
 #endif
@@ -238,8 +256,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_NUMBER
   std::array<number::Number *, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> numbers_{};
   // The set point limits the pump reports, in Pa or rpm
-  std::array<float, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> min_{};
-  std::array<float, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> max_{};
+  std::array<float, SET_POINT_COUNT> min_{};
+  std::array<float, SET_POINT_COUNT> max_{};
+#endif
+#ifdef USE_SWITCH
+  std::array<switch_::Switch *, static_cast<size_t>(SwitchSetting::SWITCH_SETTING_COUNT)> switches_{};
 #endif
   // The body of each settings object at its last valid read, to check a read before a write against it
   std::array<std::array<uint8_t, MAX_WRITE_SIZE>, static_cast<size_t>(Setting::SETTING_COUNT)> last_body_{};

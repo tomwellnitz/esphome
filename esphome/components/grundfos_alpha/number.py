@@ -5,8 +5,10 @@ from esphome.components import number
 import esphome.config_validation as cv
 from esphome.const import (
     ENTITY_CATEGORY_CONFIG,
+    UNIT_HOUR,
     UNIT_METER,
     UNIT_REVOLUTIONS_PER_MINUTE,
+    UNIT_SECOND,
 )
 from esphome.types import ConfigType
 
@@ -17,6 +19,8 @@ DEPENDENCIES = ["grundfos_alpha"]
 CONF_CONSTANT_PRESSURE_SETPOINT = "constant_pressure_setpoint"
 CONF_CONSTANT_SPEED_SETPOINT = "constant_speed_setpoint"
 CONF_PROPORTIONAL_PRESSURE_SETPOINT = "proportional_pressure_setpoint"
+CONF_PUMP_KICK_DURATION = "pump_kick_duration"
+CONF_PUMP_KICK_WAIT = "pump_kick_wait"
 
 NumberSetting = grundfos_alpha_ns.enum("NumberSetting", is_class=True)
 
@@ -48,6 +52,24 @@ _NUMBERS = {
         UNIT_REVOLUTIONS_PER_MINUTE,
         1000,
         6000,
+        10,
+    ),
+    # The pump kick (86/2): a real ALPHA3 came with 25 h without running and a 120 s run, and took 60 s. The pump
+    # reports no limits; the ranges are a choice, and the read-back shows whether the pump kept the value.
+    CONF_PUMP_KICK_WAIT: (
+        NumberSetting.NUMBER_SETTING_PUMP_KICK_WAIT,
+        "mdi:timer-sand",
+        UNIT_HOUR,
+        1,
+        168,
+        1,
+    ),
+    CONF_PUMP_KICK_DURATION: (
+        NumberSetting.NUMBER_SETTING_PUMP_KICK_DURATION,
+        "mdi:timer-outline",
+        UNIT_SECOND,
+        10,
+        600,
         10,
     ),
 }

@@ -55,6 +55,10 @@ number:
       name: Pump proportional pressure set point
     constant_speed_setpoint:
       name: Pump constant speed set point
+    pump_kick_wait:
+      name: Pump kick wait
+    pump_kick_duration:
+      name: Pump kick duration
 
 button:
   - platform: grundfos_alpha
@@ -65,3 +69,11 @@ button:
       name: Pump stop
     reset_alarm:
       name: Pump reset alarm
+
+switch:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    pump_kick:
+      name: Pump kick
+    clock_program:
+      name: Pump clock program
