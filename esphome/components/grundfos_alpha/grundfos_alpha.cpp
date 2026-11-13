@@ -17,7 +17,8 @@ static constexpr uint8_t CLASS_MEASURED_DATA = 2;
 static constexpr uint8_t IDENTITY_REQUEST[] = {CLASS_MEASURED_DATA, 0x03, 148, 149, 150};
 // warned_ holds a bit per object index below these flags
 static constexpr uint8_t WARNED_IDENTITY = 0x80;
-static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY;
+static constexpr uint8_t WARNED_SETTING = 0x40;
+static constexpr uint8_t WARNED_FLAGS = WARNED_IDENTITY | WARNED_SETTING;
 
 // The data model of the Grundfos GO app converts with 1 m = 9804.14 Pa. A real ALPHA3 reports the default and limits
 // of its constant pressure set point (86/15) as 29412 (default), 14706 (minimum) and 44118 Pa (maximum): 3, 1.5 and
@@ -48,10 +49,17 @@ static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
     {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},
 };
 
+static constexpr uint8_t SETTINGS_OBJECT = 86;
+// Settings objects of profile 52_1_0, in the order of Setting, with the type, version and size a real ALPHA3 sends.
+// Type 0x012F operation status: control_source, operation_mode, control_mode, set_point (float).
+static constexpr SettingLayouts ALPHA3_SETTINGS = {{
+    {8, 0x012F, 1, 7},
+}};
+
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B");
 // Add a model only after it was tested on a real pump
 static constexpr Model MODELS[] = {
-    {52, 1, 0, 0, ALPHA3_OBJECTS},
+    {52, 1, 0, 0, ALPHA3_OBJECTS, &ALPHA3_SETTINGS},
 };
 
 // missing_ and warned_ keep a bit per object index
@@ -64,6 +72,30 @@ static constexpr bool objects_fit_bits() {
 }
 static_assert(objects_fit_bits(), "A model has more objects than missing_ and warned_ have bits");
 
+#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
+#ifdef USE_TEXT_SENSOR
+// Byte offsets in the bodies
+static constexpr uint8_t OFFSET_SOURCE = 0;          // 0x012F control_source
+static constexpr uint8_t OFFSET_OPERATION_MODE = 1;  // 0x012F operation_mode
+
+/// The position of value in values, or values.size() when it is not there.
+static size_t index_of(std::span<const uint8_t> values, uint8_t value) {
+  size_t i = 0;
+  while (i < values.size() && values[i] != value)
+    i++;
+  return i;
+}
+
+// OperationMode of profile 52_1_0; the last name is the fallback
+PROGMEM_STRING_TABLE(OperatingModeNames, "Normal", "Stop", "Min", "Max", "User defined", "Forced start", "No command",
+                     "Hand", "Unknown");
+// The control sources a real ALPHA3 reported: 1 with the settings of the panel, 101 while a clock program ran.
+// The data model knows more sources; they show as the fallback until a pump was seen to send them.
+static constexpr uint8_t CONTROL_SOURCES[] = {1, 101};
+PROGMEM_STRING_TABLE(ControlSourceNames, "Panel", "Clock program", "Unknown");
+#endif
+#endif
+
 void GrundfosAlpha::dump_config() {
   ESP_LOGCONFIG(TAG, "Grundfos ALPHA:\n  Address: 0x%02X", this->address_);
   LOG_UPDATE_INTERVAL(this);
@@ -75,6 +107,10 @@ void GrundfosAlpha::dump_config() {
   LOG_SENSOR("  ", "Current", this->current_sensor_);
   LOG_SENSOR("  ", "Power", this->power_sensor_);
   LOG_SENSOR("  ", "Speed", this->speed_sensor_);
+#endif
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  LOG_TEXT_SENSOR("  ", "Operating mode", this->operating_mode_text_sensor_);
+  LOG_TEXT_SENSOR("  ", "Control source", this->control_source_text_sensor_);
 #endif
 }
 
@@ -105,10 +141,30 @@ void GrundfosAlpha::on_response(const genibus::GenibusResponse &response) {
       this->request_from_(0);
     return;
   }
-  if (this->model_ == nullptr || current >= this->model_->objects.size())
+  if (this->model_ == nullptr)
     return;
-  this->decode_(current, response);
+  const size_t objects = this->model_->objects.size();
+  if (current < objects) {
+    this->decode_(current, response);
+#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
+  } else if (this->model_->settings != nullptr && current < objects + static_cast<size_t>(Setting::SETTING_COUNT)) {
+    this->decode_setting_(static_cast<Setting>(current - objects), response);
+#endif
+  } else {
+    return;
+  }
   this->request_from_(current + 1);
+}
+
+void GrundfosAlpha::on_disconnected() {
+  this->publish_unknown_();
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  // Empty, as ble_client text sensors show a lost connection
+  for (auto *text_sensor : {this->operating_mode_text_sensor_, this->control_source_text_sensor_}) {
+    if (text_sensor != nullptr && text_sensor->has_state())
+      text_sensor->publish_state("");
+  }
+#endif
 }
 
 bool GrundfosAlpha::identify_(const genibus::GenibusResponse &response) {
@@ -186,16 +242,27 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
     this->has_values_ = true;
 }
 
-void GrundfosAlpha::request_from_(size_t index) {
+void GrundfosAlpha::request_from_(size_t step) {
   const auto objects = this->model_->objects;
-  for (; index < objects.size(); index++) {
-    const ObjectLayout &layout = objects[index];
-    if ((this->missing_ & (1u << index)) != 0 || !this->wants_(layout))
+  for (; step < objects.size(); step++) {
+    const ObjectLayout &layout = objects[step];
+    if ((this->missing_ & (1u << step)) != 0 || !this->wants_(layout))
       continue;
     if (this->request_object_(layout.object, layout.sub_id))
-      this->current_ = static_cast<uint8_t>(index);
+      this->current_ = static_cast<uint8_t>(step);
     return;
   }
+#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
+  if (this->model_->settings == nullptr)
+    return;
+  for (size_t i = step - objects.size(); i < static_cast<size_t>(Setting::SETTING_COUNT); i++) {
+    if (!this->wants_setting_(static_cast<Setting>(i)))
+      continue;
+    if (this->request_object_(SETTINGS_OBJECT, (*this->model_->settings)[i].sub_id))
+      this->current_ = static_cast<uint8_t>(objects.size() + i);
+    return;
+  }
+#endif
 }
 
 bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
@@ -247,6 +314,73 @@ void GrundfosAlpha::publish_unknown_() {
       this->publish_(field.reading, NAN);
   }
 }
+
+#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
+bool GrundfosAlpha::wants_setting_(Setting setting) const {
+#ifdef USE_TEXT_SENSOR
+  if (setting == Setting::SETTING_REALIZED)
+    return this->operating_mode_text_sensor_ != nullptr || this->control_source_text_sensor_ != nullptr;
+#endif
+  return false;
+}
+
+bool GrundfosAlpha::parse_setting_(Setting setting, const genibus::GenibusResponse &response,
+                                   genibus::DataObject &object) {
+  if (response.error != GenibusError::GENIBUS_ERROR_NONE)
+    return false;
+  genibus::ApduReader reader(response.apdus);
+  genibus::Apdu apdu{};
+  const SettingLayout &layout = (*this->model_->settings)[static_cast<size_t>(setting)];
+  const bool has_apdu = reader.next(apdu);
+  const bool parsed =
+      has_apdu && apdu.data_class == genibus::CLASS_DATA_OBJECT && genibus::parse_data_object(apdu, object);
+  const bool ok = parsed && object.status == 0 && object.type == layout.type && object.version == layout.version &&
+                  object.body.size() == layout.size;
+  if (!ok && this->first_warning_(WARNED_SETTING)) {
+    // Log only the fields the reply really had
+    if (!has_apdu) {
+      ESP_LOGW(TAG, "No APDU in the reply to object 86/%u", layout.sub_id);
+    } else if (!parsed) {
+      ESP_LOGW(TAG, "Unexpected reply to object 86/%u: class %u, ACK %u, %u bytes", layout.sub_id, apdu.data_class,
+               apdu.ack, static_cast<unsigned>(apdu.data.size()));
+    } else {
+      ESP_LOGW(TAG, "Unexpected reply to object 86/%u: status %u, type 0x%04X v%u, %u bytes", layout.sub_id,
+               object.status, object.type, object.version, static_cast<unsigned>(object.body.size()));
+    }
+  }
+  return ok;
+}
+
+bool GrundfosAlpha::decode_setting_(Setting setting, const genibus::GenibusResponse &response) {
+  genibus::DataObject object{};
+  if (!this->parse_setting_(setting, response, object))
+    return false;
+  this->publish_setting_(setting, object.body);
+  return true;
+}
+
+void GrundfosAlpha::publish_setting_(Setting setting, std::span<const uint8_t> body) {
+  switch (setting) {
+    case Setting::SETTING_REALIZED:
+#ifdef USE_TEXT_SENSOR
+      PUBLISH_STATE(this->operating_mode_text_sensor_,
+                    OperatingModeNames::get_progmem_str(body[OFFSET_OPERATION_MODE], OperatingModeNames::LAST_INDEX));
+      if (this->control_source_text_sensor_ != nullptr) {
+        const size_t source = index_of(CONTROL_SOURCES, body[OFFSET_SOURCE]);
+        // The raw value lets a user report a source that has no name yet
+        if (source == std::size(CONTROL_SOURCES) && this->control_source_text_sensor_->state != "Unknown") {
+          ESP_LOGD(TAG, "Control source %u has no name", body[OFFSET_SOURCE]);
+        }
+        this->control_source_text_sensor_->publish_state(
+            ControlSourceNames::get_progmem_str(source, ControlSourceNames::LAST_INDEX));
+      }
+#endif
+      break;
+    default:
+      break;
+  }
+}
+#endif
 
 bool GrundfosAlpha::first_warning_(uint8_t bit) {
   if ((this->warned_ & bit) != 0)

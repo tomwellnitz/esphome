@@ -14,7 +14,7 @@
 #include "esphome/core/application.h"
 
 // The frames are built to the layout of a real ALPHA3: the requests and the reply headers (status, type, version,
-// size) are the ones the alpha3 component reads from a real ALPHA3; the reply values are made up.
+// size) are the ones a real ALPHA3 sends, unless a comment says otherwise. The reply values are made up.
 namespace esphome::grundfos_alpha::testing {
 
 using Bytes = std::vector<uint8_t>;
@@ -48,6 +48,14 @@ inline const Bytes REPLY_MOTOR_V2 = {
     0x80, 0x00, 0x3E, 0x00, 0x00, 0x00, 0x41, 0xA0, 0x00, 0x00, 0x41, 0x9C, 0x00, 0x00, 0x45, 0x3B, 0x80, 0x00, 0x7F,
     0xFF, 0xFF, 0xFF, 0x42, 0x20, 0x00, 0x00, 0x42, 0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x56, 0xDD};
 
+// Settings objects of group 86, with the types, versions and sizes of a real ALPHA3.
+// 86/8 type 0x012F v1: source 1 (panel), operation mode 0, control mode 14, set point 39216 Pa
+inline const Bytes FRAME_GET_86_8 = {0x27, 0x07, 0xE7, 0xF8, 0x0A, 0x03, 0x56, 0x00, 0x08, 0x24, 0x94};
+inline const Bytes REPLY_REALIZED = {0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x00, 0x01, 0x2F, 0x01, 0x00,
+                                     0x00, 0x07, 0x01, 0x00, 0x0E, 0x47, 0x19, 0x30, 0x00, 0xEB, 0x1F};
+inline const Bytes REPLY_REALIZED_STATUS_1 = {0x24, 0x12, 0xF8, 0xE7, 0x0A, 0x0E, 0x01, 0x01, 0x2F, 0x01, 0x00,
+                                              0x00, 0x07, 0x01, 0x00, 0x0E, 0x47, 0x19, 0x30, 0x00, 0x90, 0x7E};
+
 inline constexpr uint32_t TIMEOUT_MS = 1000;
 
 class TestBus : public genibus::GenibusBus {
@@ -72,20 +80,14 @@ class TestBus : public genibus::GenibusBus {
   }
 };
 
-class GrundfosAlphaTest : public ::testing::Test {
+/// A pump on a bus, without entities.
+class PumpTest : public ::testing::Test {
  protected:
   void SetUp() override {
     this->bus_.set_master_address(0xF8);
     this->pump_.set_parent(&this->bus_);
     this->pump_.set_address(0xE7);
     this->bus_.register_device(&this->pump_);
-    this->pump_.set_flow_sensor(&this->flow_);
-    this->pump_.set_head_sensor(&this->head_);
-    this->pump_.set_medium_temperature_sensor(&this->medium_temperature_);
-    this->pump_.set_voltage_sensor(&this->voltage_);
-    this->pump_.set_current_sensor(&this->current_);
-    this->pump_.set_power_sensor(&this->power_);
-    this->pump_.set_speed_sensor(&this->speed_);
   }
 
   void run_(uint32_t ms = 16) {
@@ -105,6 +107,32 @@ class GrundfosAlphaTest : public ::testing::Test {
 
   void reply_(const Bytes &frame) { this->bus_.receive_bytes(frame); }
 
+  // Connect as the transport does and identify the pump as an ALPHA3
+  void identify_() {
+    this->bus_.connected = false;
+    this->bus_.establish_connection();
+    ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+    this->reply_(REPLY_IDENTITY_ALPHA3);
+  }
+
+  TestBus bus_;
+  GrundfosAlpha pump_;
+  uint32_t now_{1000};
+};
+
+class GrundfosAlphaTest : public PumpTest {
+ protected:
+  void SetUp() override {
+    PumpTest::SetUp();
+    this->pump_.set_flow_sensor(&this->flow_);
+    this->pump_.set_head_sensor(&this->head_);
+    this->pump_.set_medium_temperature_sensor(&this->medium_temperature_);
+    this->pump_.set_voltage_sensor(&this->voltage_);
+    this->pump_.set_current_sensor(&this->current_);
+    this->pump_.set_power_sensor(&this->power_);
+    this->pump_.set_speed_sensor(&this->speed_);
+  }
+
   // Identify the pump as an ALPHA3 and answer both objects
   // Connect as the transport does at boot: on_connected() reads at once
   void read_all_() {
@@ -118,10 +146,7 @@ class GrundfosAlphaTest : public ::testing::Test {
     this->reply_(REPLY_MOTOR);
   }
 
-  TestBus bus_;
-  GrundfosAlpha pump_;
   sensor::Sensor flow_, head_, medium_temperature_, voltage_, current_, power_, speed_;
-  uint32_t now_{1000};
 };
 
 }  // namespace esphome::grundfos_alpha::testing
