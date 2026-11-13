@@ -43,6 +43,11 @@ inline const Bytes REPLY_ENERGY_LATER = {0x24, 0x25, 0xF8, 0xE7, 0x0A, 0x21, 0x0
                                          0x00, 0x1A, 0x41, 0xAC, 0x19, 0xFF, 0x3C, 0x72, 0xC8, 0xC0, 0x40,
                                          0xB4, 0xD7, 0x00, 0x00, 0x01, 0x40, 0xB4, 0xD7, 0x00, 0x41, 0xAC,
                                          0x19, 0xFF, 0x3C, 0x72, 0xC8, 0xC0, 0xD7, 0xA1};
+// Test vector: 93/1 of a pump with 10 starts and 3600 s operating time, as after a factory reset
+inline const Bytes REPLY_HISTORY_RESET = {0x24, 0x27, 0xF8, 0xE7, 0x0A, 0x23, 0x00, 0x00, 0xF8, 0x02, 0x00,
+                                          0x00, 0x1C, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x01, 0x00, 0x01, 0x00,
+                                          0x00, 0x0E, 0x10, 0x00, 0x00, 0x0B, 0xF3, 0x00, 0x00, 0x0B, 0xF3,
+                                          0x00, 0x00, 0x07, 0x36, 0x02, 0x01, 0x62, 0x03, 0xD9, 0x8B};
 // 88/25 type 0x010A v1, 6 bytes: no warning, no alarm
 inline const Bytes REPLY_FAULT_NONE = {0x24, 0x11, 0xF8, 0xE7, 0x0A, 0x0D, 0x00, 0x01, 0x0A, 0x01, 0x00,
                                        0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7, 0x4C};
@@ -216,7 +221,21 @@ TEST_F(GrundfosAlphaDiagnosticsTest, CountersHoldTheirHighestValueAfterAPowerCut
   EXPECT_NEAR(this->operating_hours_.state, 33646190.0f / 3600.0f, 0.01f);
 }
 
-TEST_F(GrundfosAlphaDiagnosticsTest, EnergyHoldsItsHighestValue) {
+TEST_F(GrundfosAlphaDiagnosticsTest, CountersThatFallFarArePublished) {
+  this->pump_.set_energy_sensor(nullptr);
+  this->pump_.set_warning_code_sensor(nullptr);
+  this->pump_.set_alarm_code_sensor(nullptr);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  this->reply_(REPLY_HISTORY_BEFORE_CUT);
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_HISTORY);
+  this->reply_(REPLY_HISTORY_RESET);
+  EXPECT_FLOAT_EQ(this->starts_.state, 10.0f);
+  EXPECT_FLOAT_EQ(this->operating_hours_.state, 1.0f);
+}
+
+TEST_F(GrundfosAlphaDiagnosticsTest, EnergyIsPublishedAsReported) {
   this->pump_.set_operating_hours_sensor(nullptr);
   this->pump_.set_starts_sensor(nullptr);
   this->pump_.set_warning_code_sensor(nullptr);
@@ -228,7 +247,7 @@ TEST_F(GrundfosAlphaDiagnosticsTest, EnergyHoldsItsHighestValue) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
   this->reply_(REPLY_ENERGY);
-  EXPECT_NEAR(this->energy_.state, 65.4814f, 0.0005f);
+  EXPECT_NEAR(this->energy_.state, 235705441.4f / 3.6e6f, 0.0005f);
 }
 
 TEST_F(GrundfosAlphaDiagnosticsTest, FaultCodesFallBackToZero) {
