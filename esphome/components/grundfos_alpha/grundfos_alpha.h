@@ -96,6 +96,8 @@ enum class Setting : uint8_t {
   SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR,
   SETTING_REALIZED,  // 86/8: the operating mode and control source in effect
   SETTING_AUTOMATIC_NIGHT_SETBACK,
+  SETTING_PUMP_KICK,      // 86/2: the automatic test run of a pump that stood still
+  SETTING_CLOCK_PROGRAM,  // 84/1: the clock program overview
   SETTING_COUNT,
 };
 
@@ -130,8 +132,11 @@ enum class NumberSetting : uint8_t {
   NUMBER_SETTING_AUTOADAPT_RADIATOR,
   NUMBER_SETTING_AUTOADAPT_UNDERFLOOR,
   NUMBER_SETTING_AUTOADAPT_RADIATOR_AND_UNDERFLOOR,
+  NUMBER_SETTING_PUMP_KICK_WAIT,  // the set points with limits from the pump come before it
+  NUMBER_SETTING_PUMP_KICK_DURATION,
   NUMBER_SETTING_COUNT,
 };
+static constexpr size_t SET_POINT_COUNT = static_cast<size_t>(NumberSetting::NUMBER_SETTING_PUMP_KICK_WAIT);
 
 enum class JobPhase : uint8_t {
   JOB_PHASE_NONE,
@@ -150,7 +155,7 @@ enum class Command : uint8_t {
   COMMAND_STOP = 5,
   COMMAND_START = 6,  // AUTO in the profile
   COMMAND_RESET_ALARM_LOG = 51,
-  // Not a class 3 ID: the class 5 write of air venting, byte_value 1 starts it, 0 stops it
+  // Not a class 3 ID: the class 5 write of air venting, value 1 starts it, 0 stops it
   COMMAND_AIR_VENTING = 0xFF,
 };
 
@@ -163,14 +168,16 @@ static constexpr uint8_t WRITE_WAIT_CYCLES = 3;
 
 enum class WriteWarning : uint8_t { WRITE_WARNING_NONE, WRITE_WARNING_SET, WRITE_WARNING_CLEAR_ON_READ };
 
-/// One write: change one byte or one big-endian float of a settings object, or send a command (setting is then
+// WriteRequest::width of a bool: only bit 0 of the byte changes
+static constexpr uint8_t WIDTH_BIT = 0;
+
+/// One write: change one big-endian value or one bool of a settings object, or send a command (setting is then
 /// SETTING_COUNT; COMMAND_AIR_VENTING is the class 5 air venting write).
 struct WriteRequest {
   Setting setting;
   uint8_t offset;  // of the value in the body
-  uint8_t byte_value;
-  bool is_float;
-  float float_value;
+  uint8_t width;   // bytes of the value, or WIDTH_BIT
+  uint32_t value;  // a float as its bits
   Command command;
 };
 
@@ -245,6 +252,10 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #if defined(USE_GRUNDFOS_ALPHA_CLOCK) && defined(USE_SENSOR)
   SUB_SENSOR(clock_deviation)
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
+  SUB_SWITCH(pump_kick)
+  SUB_SWITCH(clock_program)
+#endif
 
  public:
   void update() override;
@@ -266,6 +277,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
   void write_automatic_night_setback(bool state);
+  void write_pump_kick(bool state);
+  /// Switch the weekly schedule and single events kept in the pump; their actions can stop the pump.
+  void write_clock_program(bool state);
 #endif
 #ifdef USE_GRUNDFOS_ALPHA_WRITE
   void send_command(Command command);
@@ -375,15 +389,15 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #ifdef USE_NUMBER
   std::array<number::Number *, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> numbers_{};
   // The set point limits the pump reports, in Pa or rpm
-  std::array<float, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> min_{};
-  std::array<float, static_cast<size_t>(NumberSetting::NUMBER_SETTING_COUNT)> max_{};
+  std::array<float, SET_POINT_COUNT> min_{};
+  std::array<float, SET_POINT_COUNT> max_{};
 #endif
   // The body of each settings object at its last valid read, to check a read before a write against it
   std::array<std::array<uint8_t, MAX_WRITE_SIZE>, static_cast<size_t>(Setting::SETTING_COUNT)> last_body_{};
   std::array<WriteRequest, WRITE_QUEUE_SIZE> queue_{};
   WriteRequest job_{};
   std::array<uint8_t, MAX_WRITE_SIZE> job_body_{};  // the object as written
-  uint16_t last_known_{0};                          // bit per Setting: last_body_ holds a read
+  uint32_t last_known_{0};                          // bit per Setting: last_body_ holds a read
   uint16_t job_type_{0};
   uint8_t job_version_{0};
   uint8_t job_size_{0};
