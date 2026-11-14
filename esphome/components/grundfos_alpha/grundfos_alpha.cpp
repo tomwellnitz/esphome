@@ -686,14 +686,15 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
 
 void GrundfosAlpha::request_from_(size_t step) {
   const auto objects = this->model_->objects;
-  size_t steps = objects.size();
-#ifdef USE_GRUNDFOS_ALPHA_SETTINGS
-  if (this->model_->settings != nullptr)
-    steps += static_cast<size_t>(Setting::SETTING_COUNT);
-#ifdef USE_TEXT_SENSOR
+#if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
+  // The info steps follow the settings steps, which are skipped below for a model without settings
   const size_t info = objects.size() + static_cast<size_t>(Setting::SETTING_COUNT);
-  steps = info + static_cast<size_t>(InfoStep::INFO_STEP_COUNT);
-#endif
+  const size_t steps = info + static_cast<size_t>(InfoStep::INFO_STEP_COUNT);
+#elif defined(USE_GRUNDFOS_ALPHA_SETTINGS)
+  const size_t steps =
+      objects.size() + (this->model_->settings != nullptr ? static_cast<size_t>(Setting::SETTING_COUNT) : 0);
+#else
+  const size_t steps = objects.size();
 #endif
   std::array<genibus::ObjectId, MAX_POLL_OBJECTS> ids{};
   const size_t most = this->single_ ? 1 : ids.size();
@@ -731,7 +732,7 @@ void GrundfosAlpha::request_from_(size_t step) {
 #endif
     } else {
       const size_t i = step - objects.size();
-      if (!this->wants_setting_(static_cast<Setting>(i)))
+      if (this->model_->settings == nullptr || !this->wants_setting_(static_cast<Setting>(i)))
         continue;
       const SettingLayout &layout = (*this->model_->settings)[i];
       id = {layout.object, layout.sub_id};
