@@ -47,6 +47,16 @@ text_sensor:
       name: Pump operating mode in effect
     control_source:
       name: Pump control source
+    product_name:
+      name: Pump product name
+    product_number:
+      name: Pump product number
+    software_version:
+      name: Pump software version
+    bluetooth_software_version:
+      name: Pump Bluetooth software version
+    last_event:
+      name: Pump last event
 
 select:
   - platform: grundfos_alpha
