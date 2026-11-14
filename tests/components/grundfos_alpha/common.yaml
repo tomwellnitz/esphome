@@ -6,11 +6,23 @@ genibus_ble:
   id: grundfos_alpha_bus
   ble_client_id: grundfos_alpha_blec
 
+wifi:
+  ssid: MySSID
+  password: password1
+
+api:
+
+time:
+  - platform: homeassistant
+    id: grundfos_alpha_time
+
 grundfos_alpha:
   id: grundfos_alpha_pump
   genibus_id: grundfos_alpha_bus
   address: 0xE7
   update_interval: 30s
+  time_id: grundfos_alpha_time
+  set_clock: true
 
 sensor:
   - platform: grundfos_alpha
@@ -39,6 +51,8 @@ sensor:
       name: Pump warning code
     alarm_code:
       name: Pump alarm code
+    clock_deviation:
+      name: Pump clock deviation
 
 text_sensor:
   - platform: grundfos_alpha

@@ -27,6 +27,9 @@
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
 #include "esphome/components/switch/switch.h"
 #endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+#include "esphome/components/time/real_time_clock.h"
+#endif
 
 namespace esphome::grundfos_alpha {
 
@@ -171,7 +174,17 @@ struct WriteRequest {
   Command command;
 };
 
+enum class ClockPhase : uint8_t {
+  CLOCK_PHASE_NONE,
+  CLOCK_PHASE_CHECK,    // 94/101 is read to compare the pump's clock with the time source
+  CLOCK_PHASE_READ,     // 94/100 is read before it is written
+  CLOCK_PHASE_WRITE,    // 94/100 is written with the local time
+  CLOCK_PHASE_VERIFY,   // 94/100 is read back
+  CLOCK_PHASE_RECHECK,  // 94/101 is read again to see that the clock took the time
+};
+
 /// The objects read from a pump of one unit family, type and version; settings is null for a model without them.
+/// has_clock: the pump has the clock objects 94/100 and 94/101 in the layout of profile 52_1_0.
 struct Model {
   uint8_t family;
   uint8_t type;
@@ -180,9 +193,11 @@ struct Model {
   std::span<const ObjectLayout> objects;
   const SettingLayouts *settings;
   bool info;  // whether the pump has the class 7 texts of TEXT_IDS and the event log in object 88
+  bool has_clock;
 };
 
 // Values of current_ besides a step of the poll chain
+static constexpr uint8_t REQUEST_CLOCK = 0xFC;
 static constexpr uint8_t REQUEST_WRITE = 0xFD;
 static constexpr uint8_t REQUEST_IDENTITY = 0xFE;
 static constexpr uint8_t REQUEST_NONE = 0xFF;
@@ -227,6 +242,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
 #if defined(USE_GRUNDFOS_ALPHA_WRITE) && defined(USE_SWITCH)
   SUB_SWITCH(automatic_night_setback)
 #endif
+#if defined(USE_GRUNDFOS_ALPHA_CLOCK) && defined(USE_SENSOR)
+  SUB_SENSOR(clock_deviation)
+#endif
 
  public:
   void update() override;
@@ -254,6 +272,11 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   /// Start or stop air venting, which runs the pump at high speed. The Grundfos GO app data give it a timeout (86/101,
   /// 1800 s); that the pump ends it by itself is not confirmed on a pump, so stop it when done.
   void write_air_venting(bool on);
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  void set_time_id(time::RealTimeClock *time) { this->time_ = time; }
+  /// Set the pump's clock when it is off; without this the clock is only checked.
+  void set_clock_writes(bool writes) { this->clock_writes_ = writes; }
 #endif
 
  protected:
@@ -306,6 +329,16 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   const SettingLayout &job_layout_() const;
   /// Why the job must not start now, or nullptr when it may.
   const LogString *job_refusal_() const;
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  /// Start the clock check when it is due and the time source is valid; false when it was not started.
+  bool start_clock_();
+  void continue_clock_(const genibus::GenibusResponse &response);
+  /// The pump's clock in 94/101 minus the local time of the time source, in seconds; false when the reply holds no
+  /// valid time.
+  bool clock_deviation_(const genibus::GenibusResponse &response, int32_t &deviation);
+  /// block_writes: the pump answered a write but the clock is still not right; only checks follow until restart.
+  void end_clock_(const LogString *failure, bool block_writes);
 #endif
   void publish_(Reading reading, float value);
   void publish_unknown_();
@@ -360,6 +393,16 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool reply_failed_{false};  // the last reply was an error, so a late answer may still come
   // The status warning is a failed write; it clears at the first valid settings read of a later poll cycle
   WriteWarning write_warning_{WriteWarning::WRITE_WARNING_NONE};
+#endif
+#ifdef USE_GRUNDFOS_ALPHA_CLOCK
+  time::RealTimeClock *time_{nullptr};
+  uint32_t clock_checked_at_{0};
+  std::array<uint8_t, 10> clock_body_{};  // 94/100 as written
+  ClockPhase clock_phase_{ClockPhase::CLOCK_PHASE_NONE};
+  bool clock_due_{true};      // check at the first update with a valid time after a connection
+  bool clock_polled_{false};  // a poll chain ended since the connection came up
+  bool clock_writes_{false};
+  bool clock_write_blocked_{false};
 #endif
 };
 

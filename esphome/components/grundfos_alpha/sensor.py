@@ -8,6 +8,7 @@ from esphome.const import (
     CONF_HEAD,
     CONF_POWER,
     CONF_SPEED,
+    CONF_TIME_ID,
     CONF_VOLTAGE,
     DEVICE_CLASS_CURRENT,
     DEVICE_CLASS_DURATION,
@@ -27,9 +28,11 @@ from esphome.const import (
     UNIT_KILOWATT_HOURS,
     UNIT_METER,
     UNIT_REVOLUTIONS_PER_MINUTE,
+    UNIT_SECOND,
     UNIT_VOLT,
     UNIT_WATT,
 )
+import esphome.final_validate as fv
 from esphome.types import ConfigType
 
 from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
@@ -37,6 +40,7 @@ from . import CONF_GRUNDFOS_ALPHA_ID, GrundfosAlpha
 DEPENDENCIES = ["grundfos_alpha"]
 
 CONF_ALARM_CODE = "alarm_code"
+CONF_CLOCK_DEVIATION = "clock_deviation"
 CONF_MEDIUM_TEMPERATURE = "medium_temperature"
 CONF_OPERATING_HOURS = "operating_hours"
 CONF_STARTS = "starts"
@@ -100,8 +104,31 @@ CONFIG_SCHEMA = cv.Schema(
             accuracy_decimals=0,
             entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
         ),
+        # The pump's clock minus the time source, found at each check before the clock is set
+        cv.Optional(CONF_CLOCK_DEVIATION): sensor.sensor_schema(
+            unit_of_measurement=UNIT_SECOND,
+            accuracy_decimals=0,
+            icon="mdi:clock-alert-outline",
+            entity_category=ENTITY_CATEGORY_DIAGNOSTIC,
+        ),
     }
 )
+
+
+def _final_validate(config: ConfigType) -> ConfigType:
+    if CONF_CLOCK_DEVIATION not in config:
+        return config
+    full_config = fv.full_config.get()
+    hub_path = full_config.get_path_for_id(config[CONF_GRUNDFOS_ALPHA_ID])[:-1]
+    if CONF_TIME_ID not in full_config.get_config_for_path(hub_path):
+        raise cv.Invalid(
+            f"{CONF_CLOCK_DEVIATION} needs {CONF_TIME_ID} in the grundfos_alpha hub",
+            path=[CONF_CLOCK_DEVIATION],
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = _final_validate
 
 
 async def to_code(config: ConfigType) -> None:
@@ -119,3 +146,4 @@ async def to_code(config: ConfigType) -> None:
     await sensors(CONF_STARTS, hub.set_starts_sensor)
     await sensors(CONF_WARNING_CODE, hub.set_warning_code_sensor)
     await sensors(CONF_ALARM_CODE, hub.set_alarm_code_sensor)
+    await sensors(CONF_CLOCK_DEVIATION, hub.set_clock_deviation_sensor)
