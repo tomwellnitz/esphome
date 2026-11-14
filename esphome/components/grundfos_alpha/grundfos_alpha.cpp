@@ -567,10 +567,10 @@ bool GrundfosAlpha::wants_(const ObjectLayout &layout) const {
 
 void GrundfosAlpha::publish_(Reading reading, float value) {
 #ifdef USE_SENSOR
-  // A 93/1 counter that falls back a little after a power cut keeps its highest value until it passes it again, so
-  // that total_increasing sensors do not go down. A larger fall, such as another pump or a factory reset, is
-  // published as it is. A restart of the ESP forgets the highest values.
-  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_OPERATING_HOURS);
+  // A counter that falls back a little after a power cut (the energy, operating hours and starts) keeps its highest
+  // value until it passes it again, so that total_increasing sensors do not go down. A larger fall, such as another
+  // pump or a factory reset, is published as it is. A restart of the ESP forgets the highest values.
+  const size_t total = static_cast<size_t>(reading) - static_cast<size_t>(Reading::READING_ENERGY);
   if (total < this->totals_.size() && !std::isnan(value)) {
     float &held = this->totals_[total];
     if (value < held && value >= held * COUNTER_HOLD_SHARE)
