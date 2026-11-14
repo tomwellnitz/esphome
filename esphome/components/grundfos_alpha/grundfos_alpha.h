@@ -38,8 +38,8 @@ enum class Reading : uint8_t {
   READING_CURRENT,
   READING_POWER,
   READING_SPEED,
+  // The counters of 87/1 and 93/1, which fall back a little after a power cut; keep them together (see totals_)
   READING_ENERGY,
-  // The counters of 93/1, which fall back a little after a power cut; keep them together (see totals_)
   READING_OPERATING_HOURS,
   READING_STARTS,
   READING_WARNING_CODE,
@@ -310,10 +310,9 @@ class GrundfosAlpha final : public genibus::GenibusDevice {
   bool unsupported_{false};
   bool has_values_{false};
 #ifdef USE_SENSOR
-  // The highest value published per counter, from READING_OPERATING_HOURS to READING_STARTS
-  std::array<float,
-             static_cast<size_t>(Reading::READING_STARTS) - static_cast<size_t>(Reading::READING_OPERATING_HOURS) + 1>
-      totals_{NAN, NAN};
+  // The highest value published per counter, from READING_ENERGY to READING_STARTS
+  std::array<float, static_cast<size_t>(Reading::READING_STARTS) - static_cast<size_t>(Reading::READING_ENERGY) + 1>
+      totals_{NAN, NAN, NAN};
 #endif
 #if defined(USE_GRUNDFOS_ALPHA_SETTINGS) && defined(USE_TEXT_SENSOR)
   // The latest event of the log the last event sensor was set for; NO_EVENT_SHOWN before it was set
