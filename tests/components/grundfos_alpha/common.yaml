@@ -85,3 +85,15 @@ button:
       name: Pump stop
     reset_alarm:
       name: Pump reset alarm
+    start_air_venting:
+      name: Pump start air venting
+    stop_air_venting:
+      name: Pump stop air venting
+    clear_alarm_log:
+      name: Pump clear alarm log
+
+switch:
+  - platform: grundfos_alpha
+    grundfos_alpha_id: grundfos_alpha_pump
+    automatic_night_setback:
+      name: Pump automatic night setback

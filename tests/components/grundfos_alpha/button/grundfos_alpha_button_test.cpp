@@ -8,7 +8,7 @@ using CommandTest = SelectTest;
 static const Bytes REPLY_OPERATING_MODE_STOP_CURVE = {0x24, 0x0F, 0xF8, 0xE7, 0x0A, 0x0B, 0x00, 0x01, 0x54, 0x01,
                                                       0x00, 0x00, 0x04, 0x00, 0x01, 0x02, 0x01, 0x18, 0xA7};
 
-TEST_F(CommandTest, SendsTheThreeCommands) {
+TEST_F(CommandTest, SendsTheCommands) {
   this->identify_();
   EXPECT_TRUE(this->next_request_().empty());
   // Start and stop are read back over 86/100; an alarm reset has nothing to read back
@@ -26,6 +26,12 @@ TEST_F(CommandTest, SendsTheThreeCommands) {
   EXPECT_FALSE(this->pump_.status_has_warning());
   this->pump_.send_command(Command::COMMAND_RESET_ALARM);
   ASSERT_EQ(this->next_request_(), FRAME_COMMAND_2);
+  this->reply_(REPLY_COMMAND_ACK);
+  EXPECT_TRUE(this->next_request_().empty());
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  // Clearing the alarm log has nothing to read back either
+  this->pump_.send_command(Command::COMMAND_RESET_ALARM_LOG);
+  ASSERT_EQ(this->next_request_(), FRAME_COMMAND_51);
   this->reply_(REPLY_COMMAND_ACK);
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->pump_.status_has_warning());
@@ -89,8 +95,76 @@ TEST_F(CommandTest, TimeoutOfTheReadBackIsWarned) {
 
 TEST_F(CommandTest, OnlyTheAppsCommandsAreSent) {
   this->identify_();
-  this->pump_.send_command(static_cast<Command>(1));
+  // 1 is not one of them; 7 is REMOTE, which leaves an ALPHA deaf to Bluetooth for a while
+  for (uint8_t id : {1, 4, 7, 8, 22, 52}) {
+    this->pump_.send_command(static_cast<Command>(id));
+    EXPECT_TRUE(this->next_request_().empty());
+  }
+}
+
+TEST_F(CommandTest, StartsAndStopsAirVenting) {
+  this->identify_();
+  this->pump_.write_air_venting(true);
+  ASSERT_EQ(this->next_request_(), FRAME_AIR_VENTING_ON);
+  this->reply_(REPLY_REFERENCE_ACK);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  this->pump_.write_air_venting(false);
+  ASSERT_EQ(this->next_request_(), FRAME_AIR_VENTING_OFF);
+  this->reply_(REPLY_REFERENCE_ACK);
+  EXPECT_FALSE(this->pump_.status_has_warning());
   EXPECT_TRUE(this->next_request_().empty());
+}
+
+TEST_F(CommandTest, BadAirVentingRepliesAreWarned) {
+  // ACK 3, a reply with data, a class 3 reply, and none at all
+  this->identify_();
+  for (const Bytes &reply : {REPLY_REFERENCE_ACK_ILLEGAL, REPLY_REFERENCE_WITH_DATA, REPLY_COMMAND_ACK, Bytes{}}) {
+    this->pump_.write_air_venting(true);
+    ASSERT_EQ(this->next_request_(), FRAME_AIR_VENTING_ON);
+    if (reply.empty()) {
+      this->run_(TIMEOUT_MS);
+    } else {
+      this->reply_(reply);
+    }
+    EXPECT_TRUE(this->pump_.status_has_warning());
+    this->pump_.update();
+    EXPECT_FALSE(this->pump_.status_has_warning());
+  }
+}
+
+// A stop that comes while the start still waits replaces it
+TEST_F(CommandTest, WaitingAirVentingIsReplaced) {
+  this->read_selects_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->pump_.write_air_venting(true);
+  this->pump_.write_air_venting(false);
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  EXPECT_EQ(this->next_request_(), FRAME_AIR_VENTING_OFF);
+  EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
+}
+
+TEST_F(CommandTest, AirVentingIsRefusedWithoutConnection) {
+  this->identify_();
+  this->bus_.lose_connection();
+  this->pump_.write_air_venting(true);
+  this->bus_.establish_connection();
+  this->run_();
+  EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
+}
+
+// The bus refuses the write when the link is gone before the bus has noticed; the warning comes at once, not only
+// when the bus reports the loss
+TEST_F(CommandTest, AirVentingNotSentIsWarned) {
+  this->read_selects_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  this->pump_.write_air_venting(true);
+  this->bus_.connected = false;
+  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  EXPECT_TRUE(this->pump_.status_has_warning());
+  this->run_();
+  EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
 }
 
 TEST_F(CommandTest, RefusedCommandIsWarned) {

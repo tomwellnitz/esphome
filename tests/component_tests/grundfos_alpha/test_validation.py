@@ -5,7 +5,17 @@ import pytest
 from esphome import config_validation as cv
 from esphome.components.genibus import CONF_GENIBUS_ID
 from esphome.components.grundfos_alpha import CONFIG_SCHEMA, validate_update_interval
-from esphome.const import CONF_UPDATE_INTERVAL, PlatformFramework
+from esphome.components.grundfos_alpha.switch import (
+    CONF_AUTOMATIC_NIGHT_SETBACK,
+    CONFIG_SCHEMA as SWITCH_SCHEMA,
+)
+from esphome.const import (
+    CONF_INITIAL_STATE,
+    CONF_RESTORE_MODE,
+    CONF_RESTORE_STATE,
+    CONF_UPDATE_INTERVAL,
+    PlatformFramework,
+)
 from esphome.types import ConfigType
 from tests.component_tests.types import SetCoreConfigCallable
 
@@ -43,3 +53,24 @@ def test_schema_rejects_an_update_interval_below_5_s(
     set_core_config(PlatformFramework.ESP32_IDF)
     with pytest.raises(cv.Invalid, match="at least 5s"):
         CONFIG_SCHEMA({CONF_GENIBUS_ID: "bus", CONF_UPDATE_INTERVAL: "4s"})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (CONF_RESTORE_MODE, "RESTORE_DEFAULT_OFF"),
+        (CONF_RESTORE_MODE, "DISABLED"),
+        (CONF_RESTORE_STATE, "previous"),
+        (CONF_INITIAL_STATE, True),
+    ],
+)
+def test_switch_rejects_restore_options(key: str, value: object) -> None:
+    schema = SWITCH_SCHEMA.schema[CONF_AUTOMATIC_NIGHT_SETBACK]
+    with pytest.raises(cv.Invalid, match="Not supported"):
+        schema({"name": "Night setback", key: value})
+
+
+def test_switch_does_not_restore() -> None:
+    schema = SWITCH_SCHEMA.schema[CONF_AUTOMATIC_NIGHT_SETBACK]
+    config = schema({"name": "Night setback"})
+    assert str(config[CONF_RESTORE_MODE]) == "DISABLED"
