@@ -87,7 +87,7 @@ _NUMBERS = {
         0.01,
     ),
     # The pump kick (86/2): a real ALPHA3 came with 25 h without running and a 120 s run, and took a run of 60 s
-    # and 120 s. Writing the wait time is not yet tested on a pump. The pump reports no limits, and both ranges are
+    # and 120 s, and on 14.11.2026 a wait of 26 h and a run of 130 s. The pump reports no limits, and both ranges are
     # an assumption without a source; the read-back shows whether the pump kept the value.
     CONF_PUMP_KICK_WAIT: (
         NumberSetting.NUMBER_SETTING_PUMP_KICK_WAIT,
