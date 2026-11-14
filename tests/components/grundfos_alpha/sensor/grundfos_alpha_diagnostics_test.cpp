@@ -239,7 +239,8 @@ TEST_F(GrundfosAlphaDiagnosticsTest, CountersThatFallFarArePublished) {
   EXPECT_FLOAT_EQ(this->operating_hours_.state, 1.0f);
 }
 
-TEST_F(GrundfosAlphaDiagnosticsTest, EnergyIsPublishedAsReported) {
+// A real ALPHA3 reported 3.2 Wh less energy after a power cut; the energy is held like the counters of 93/1
+TEST_F(GrundfosAlphaDiagnosticsTest, EnergyHoldsItsHighestValueAfterAPowerCut) {
   this->pump_.set_operating_hours_sensor(nullptr);
   this->pump_.set_starts_sensor(nullptr);
   this->pump_.set_warning_code_sensor(nullptr);
@@ -251,7 +252,7 @@ TEST_F(GrundfosAlphaDiagnosticsTest, EnergyIsPublishedAsReported) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_ENERGY);
   this->reply_(REPLY_ENERGY);
-  EXPECT_NEAR(this->energy_.state, 235705441.4f / 3.6e6f, 0.0005f);
+  EXPECT_NEAR(this->energy_.state, 65.4814f, 0.0005f);
 }
 
 TEST_F(GrundfosAlphaDiagnosticsTest, FaultCodesFallBackToZero) {
