@@ -127,6 +127,8 @@ class GenibusDevice : public PollingComponent, public Parented<GenibusBus> {
   bool set_object_(uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version, std::span<const uint8_t> body);
   /// Send one class 3 command.
   bool send_command_(uint8_t command);
+  /// Send a class 7 GET of one text; genibus::parse_text() reads the reply.
+  bool request_text_(uint8_t id);
 
   uint8_t address_{0};
 };

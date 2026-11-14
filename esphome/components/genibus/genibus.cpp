@@ -208,4 +208,10 @@ bool GenibusDevice::send_command_(uint8_t command) {
   return this->parent_->send(this, apdu);
 }
 
+bool GenibusDevice::request_text_(uint8_t id) {
+  uint8_t apdu[3];
+  put_get_text(apdu, id);
+  return this->parent_->send(this, apdu);
+}
+
 }  // namespace esphome::genibus

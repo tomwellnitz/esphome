@@ -88,6 +88,7 @@ class TestDevice : public GenibusDevice {
   bool request_flow_head() { return this->request_object_(93, 289); }
   bool set(std::span<const uint8_t> body) { return this->set_object_(86, 100, 0x0154, 1, body); }
   bool command(uint8_t id) { return this->send_command_(id); }
+  bool text(uint8_t id) { return this->request_text_(id); }
 
   std::vector<Received> responses;
   int connects{0};
@@ -541,6 +542,14 @@ TEST_F(GenibusBusTest, DeviceSendsCommand) {
   this->run_();
   ASSERT_EQ(this->bus_.written.size(), 1u);
   EXPECT_EQ(this->bus_.written[0], (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x03, 0x81, 0x06, 0xE5, 0x87}));
+}
+
+TEST_F(GenibusBusTest, DeviceRequestsText) {
+  EXPECT_TRUE(this->pump_.text(1));
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  // As a real ALPHA3 was asked for its product name
+  EXPECT_EQ(this->bus_.written[0], (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x07, 0x01, 0x01, 0x52, 0x38}));
 }
 
 TEST_F(GenibusBusTest, SetBodyMustFitOneRequest) {

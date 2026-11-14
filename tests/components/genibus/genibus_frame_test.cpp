@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "esphome/components/genibus/genibus_frame.h"
@@ -89,6 +90,12 @@ TEST(GenibusFrame, BuildsCommands) {
   uint8_t apdu[3];
   EXPECT_EQ(put_command(apdu, 6), apdu + 3);
   EXPECT_EQ(build(0xE7, 0xF8, {apdu, apdu + 3}), (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x03, 0x81, 0x06, 0xE5, 0x87}));
+}
+
+TEST(GenibusFrame, BuildsTextRequest) {
+  uint8_t apdu[3];
+  EXPECT_EQ(put_get_text(apdu, 50), apdu + 3);
+  EXPECT_EQ(build(0xE7, 0xF8, {apdu, apdu + 3}), (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x07, 0x01, 0x32, 0x54, 0x08}));
 }
 
 TEST(GenibusFrame, RefusesRequestThatDoesNotFit) {
@@ -244,6 +251,40 @@ TEST(GenibusFrame, OtherRepliesAreNoMissingObject) {
   Apdu apdu{};
   ASSERT_TRUE(reader.next(apdu));
   EXPECT_FALSE(is_object_missing(apdu));
+}
+
+TEST(GenibusFrame, ParsesText) {
+  // A real ALPHA3's reply to class 7 ID 8 (device_prod_no)
+  const Bytes reply = {0x24, 0x0D, 0xF8, 0xE7, 0x07, 0x09, 0x39, 0x39, 0x33,
+                       0x37, 0x31, 0x39, 0x32, 0x39, 0x00, 0xDB, 0x55};
+  FrameAssembler assembler;
+  ASSERT_EQ(feed(assembler, reply, 20), 1);
+  ASSERT_TRUE(assembler.crc_ok());
+  ApduReader reader(assembler.apdus());
+  Apdu apdu{};
+  ASSERT_TRUE(reader.next(apdu));
+  std::span<const uint8_t> text;
+  ASSERT_TRUE(parse_text(apdu, text));
+  EXPECT_EQ(std::string(text.begin(), text.end()), "99371929");
+  const Bytes empty = {0x00};
+  ASSERT_TRUE(parse_text({CLASS_ASCII, 0, empty}, text));
+  EXPECT_TRUE(text.empty());
+}
+
+TEST(GenibusFrame, RejectsBadText) {
+  const Bytes no_zero = {0x41, 0x42};
+  const Bytes control = {0x41, 0x0A, 0x42, 0x00};
+  const Bytes inner_zero = {0x41, 0x00, 0x42, 0x00};
+  const Bytes high = {0x41, 0xC4, 0x00};
+  const Bytes ok = {0x41, 0x00};
+  std::span<const uint8_t> text;
+  EXPECT_FALSE(parse_text({CLASS_ASCII, 0, {}}, text));
+  EXPECT_FALSE(parse_text({CLASS_ASCII, 0, no_zero}, text));
+  EXPECT_FALSE(parse_text({CLASS_ASCII, 0, control}, text));
+  EXPECT_FALSE(parse_text({CLASS_ASCII, 0, inner_zero}, text));
+  EXPECT_FALSE(parse_text({CLASS_ASCII, 0, high}, text));
+  EXPECT_FALSE(parse_text({CLASS_ASCII, ACK_UNKNOWN_ID, ok}, text));
+  EXPECT_FALSE(parse_text({CLASS_DATA_OBJECT, 0, ok}, text));
 }
 
 }  // namespace esphome::genibus::testing
