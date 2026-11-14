@@ -86,6 +86,8 @@ class TestDevice : public GenibusDevice {
     this->sent_on_disconnect = this->request_flow_head();
   }
   bool request_flow_head() { return this->request_object_(93, 289); }
+  bool set(std::span<const uint8_t> body) { return this->set_object_(86, 100, 0x0154, 1, body); }
+  bool command(uint8_t id) { return this->send_command_(id); }
 
   std::vector<Received> responses;
   int connects{0};
@@ -519,6 +521,38 @@ TEST_F(GenibusBusTest, LoopRunsOnlyWhileThereIsWork) {
   EXPECT_TRUE(this->bus_.is_idle());
   EXPECT_FALSE(this->pump_.request_flow_head());
   EXPECT_TRUE(this->bus_.is_idle());
+}
+
+TEST_F(GenibusBusTest, DeviceSendsSet) {
+  // Recorded from a real ALPHA3, which acknowledged and stored it
+  const uint8_t operating_mode[] = {0x00, 0x03, 0x0F, 0x01};
+  EXPECT_TRUE(this->pump_.set(operating_mode));
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0], (Bytes{0x27, 0x11, 0xE7, 0xF8, 0x0A, 0x8D, 0x56, 0x00, 0x64, 0x01, 0x54,
+                                          0x01, 0x00, 0x00, 0x04, 0x00, 0x03, 0x0F, 0x01, 0xCA, 0x45}));
+  this->receive_(REPLY_ACK);
+  ASSERT_EQ(this->pump_.responses.size(), 1u);
+  EXPECT_EQ(this->pump_.responses[0].error, GenibusError::GENIBUS_ERROR_NONE);
+}
+
+TEST_F(GenibusBusTest, DeviceSendsCommand) {
+  EXPECT_TRUE(this->pump_.command(6));
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0], (Bytes{0x27, 0x05, 0xE7, 0xF8, 0x03, 0x81, 0x06, 0xE5, 0x87}));
+}
+
+TEST_F(GenibusBusTest, SetBodyMustFitOneRequest) {
+  const Bytes largest(MAX_SET_BODY_SIZE, 0);
+  const Bytes too_large(MAX_SET_BODY_SIZE + 1, 0);
+  EXPECT_FALSE(this->pump_.set({}));
+  EXPECT_FALSE(this->pump_.set(too_large));
+  EXPECT_FALSE(this->bus_.is_busy(&this->pump_));
+  EXPECT_TRUE(this->pump_.set(largest));
+  this->run_();
+  ASSERT_EQ(this->bus_.written.size(), 1u);
+  EXPECT_EQ(this->bus_.written[0].size(), MAX_REQUEST_SIZE + FRAME_OVERHEAD + 2);
 }
 
 TEST_F(GenibusBusTest, RefusesBadRequests) {

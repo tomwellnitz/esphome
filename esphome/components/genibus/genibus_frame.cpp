@@ -34,6 +34,25 @@ uint8_t *put_get_object(uint8_t *dst, uint8_t object, uint16_t sub_id) {
   return put_be16(dst, sub_id);
 }
 
+uint8_t *put_set_object(uint8_t *dst, uint8_t object, uint16_t sub_id, uint16_t type, uint8_t version,
+                        std::span<const uint8_t> body) {
+  *dst++ = CLASS_DATA_OBJECT;
+  *dst++ = OPERATION_SET | static_cast<uint8_t>(SET_OBJECT_HEADER_SIZE + body.size());
+  *dst++ = object;
+  dst = put_be16(dst, sub_id);
+  dst = put_be16(dst, type);
+  *dst++ = version;
+  dst = put_be24(dst, body.size());
+  return std::copy(body.begin(), body.end(), dst);
+}
+
+uint8_t *put_command(uint8_t *dst, uint8_t command) {
+  *dst++ = CLASS_COMMAND;
+  *dst++ = OPERATION_SET | 1;
+  *dst++ = command;
+  return dst;
+}
+
 bool ApduReader::next(Apdu &apdu) {
   if (this->rest_.size() < 2)
     return false;
