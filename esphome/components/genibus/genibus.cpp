@@ -11,7 +11,8 @@ namespace esphome::genibus {
 
 ESPHOME_LOG_TAG(TAG, "genibus");
 
-static constexpr size_t MAX_LOG_BYTES = 64;
+// Enough for a whole reply to four objects in one request (up to 117 bytes), so the VERBOSE log shows all of it
+static constexpr size_t MAX_LOG_BYTES = 120;
 
 // GenibusError, in order
 PROGMEM_STRING_TABLE(GenibusErrorStrings, "none", "no answer", "CRC error", "malformed answer", "write failed",
