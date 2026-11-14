@@ -39,8 +39,8 @@ static constexpr float COUNTER_HOLD_SHARE = 0.9f;
 static constexpr Field ALPHA3_PROCESS_FIELDS[] = {
     {Reading::READING_FLOW, 0, FieldFormat::FIELD_FORMAT_FLOAT, SECONDS_PER_HOUR},
     {Reading::READING_HEAD, 4, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f / PASCAL_PER_METER},
-    // °C, unlike the SI units of the other fields. A real ALPHA3 sends exactly 0 for about a minute after power-up.
-    {Reading::READING_MEDIUM_TEMPERATURE, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f, true},
+    // °C, unlike the SI units of the other fields
+    {Reading::READING_MEDIUM_TEMPERATURE, 16, FieldFormat::FIELD_FORMAT_FLOAT, 1.0f},
 };
 // 87/69, type 0x0100 v1: grid_voltage, dc_link_voltage, current, power_consumption, dc_power_consumption,
 // absolute_speed (rpm), three temperatures, pwm_type
@@ -131,7 +131,8 @@ static float read_field(const Field &field, std::span<const uint8_t> body) {
     case FieldFormat::FIELD_FORMAT_FLOAT:
       break;
   }
-  if (field.zero_is_unknown && encode_uint32(at[0], at[1], at[2], at[3]) == 0)
+  // A real ALPHA3 sends exactly 0 as the medium temperature for about a minute after power-up: no value yet
+  if (field.reading == Reading::READING_MEDIUM_TEMPERATURE && encode_uint32(at[0], at[1], at[2], at[3]) == 0)
     return NAN;
   return read_float(at);
 }
