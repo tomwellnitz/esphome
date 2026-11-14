@@ -61,12 +61,8 @@ class AutoAdaptTest : public SelectTest {
   void read_radiator_and_underfloor_(const Bytes &control_mode = REPLY_CONTROL_MODE_CP) {
     this->pump_.set_number(RADIATOR_AND_UNDERFLOOR, &this->number_);
     this->identify_();
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-    this->reply_(control_mode);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_23);
-    this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
-    this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT);
+    ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_23, FRAME_GET_86_24}));
+    this->reply_(bundle({control_mode, REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS, REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT}));
     ASSERT_TRUE(this->next_request_().empty());
   }
 
@@ -95,9 +91,7 @@ TEST_F(AutoAdaptTest, ReadsLimitsOnceAndTheSetPointWithTheControlMode) {
   this->read_radiator_and_underfloor_();
   EXPECT_NEAR(this->number_.state, 20588.4f / 9804.0f, 1e-4f);
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  EXPECT_EQ(this->next_request_(), FRAME_GET_86_24);
+  EXPECT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_24}));
 }
 
 TEST_F(AutoAdaptTest, WritesTheRadiatorAndUnderfloorSetPointInConstantPressure) {
@@ -128,10 +122,8 @@ TEST_F(AutoAdaptTest, NextWriteWaitsForAFreshControlMode) {
   this->write_2_until_set_();
   this->pump_.write_number(RADIATOR_AND_UNDERFLOOR, 2.5f);
   this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
-  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_24}));
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT_2}));
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_TRUE(this->pump_.status_has_warning());
 }
@@ -140,14 +132,9 @@ TEST_F(AutoAdaptTest, WritesInProportionalPressure) {
   this->use_selects_();
   this->pump_.set_number(UNDERFLOOR_SET_POINT, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_PP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_21);
-  this->reply_(REPLY_UNDERFLOOR_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_22);
-  this->reply_(REPLY_UNDERFLOOR_SETPOINT);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_100, FRAME_GET_86_21, FRAME_GET_86_22}));
+  this->reply_(
+      bundle({REPLY_CONTROL_MODE_PP, REPLY_OPERATING_MODE_NORMAL, REPLY_UNDERFLOOR_LIMITS, REPLY_UNDERFLOOR_SETPOINT}));
   ASSERT_TRUE(this->next_request_().empty());
   this->pump_.write_number(UNDERFLOOR_SET_POINT, 1.5f);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_22);
@@ -160,12 +147,8 @@ TEST_F(AutoAdaptTest, WritesInProportionalPressure) {
 TEST_F(AutoAdaptTest, UsesTheLimitsOfItsMode) {
   this->pump_.set_number(RADIATOR, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_19);
-  this->reply_(REPLY_RADIATOR_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_20);
-  this->reply_(REPLY_RADIATOR_SETPOINT);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_19, FRAME_GET_86_20}));
+  this->reply_(bundle({REPLY_CONTROL_MODE_CP, REPLY_RADIATOR_LIMITS, REPLY_RADIATOR_SETPOINT}));
   EXPECT_FLOAT_EQ(this->number_.state, 3.0f);
   this->pump_.write_number(RADIATOR, 1.5f);
   this->pump_.write_number(RADIATOR, 4.6f);
@@ -177,13 +160,10 @@ TEST_F(AutoAdaptTest, UsesTheLimitsOfItsMode) {
 TEST_F(AutoAdaptTest, NoWriteBeforeTheLimits) {
   this->pump_.set_number(RADIATOR_AND_UNDERFLOOR, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_23);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_23, FRAME_GET_86_24}));
   this->pump_.write_number(RADIATOR_AND_UNDERFLOOR, 2.0f);
-  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
-  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT);
+  this->reply_(
+      bundle({REPLY_CONTROL_MODE_CP, REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS, REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT}));
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->wrote_(FRAME_SET_RADIATOR_AND_UNDERFLOOR_2));
 }
@@ -206,16 +186,11 @@ TEST_F(AutoAdaptTest, OtherSetPointsKeepTheirControlModeCheck) {
   this->pump_.set_number(NumberSetting::NUMBER_SETTING_CONSTANT_PRESSURE, &constant_pressure);
   this->pump_.set_number(RADIATOR_AND_UNDERFLOOR, &this->number_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_PP);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_15);
-  this->reply_(REPLY_CP_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_16);
-  this->reply_(REPLY_CP_SETPOINT);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_23);
-  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_24);
-  this->reply_(REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT);
+  // With 86/23 the reply would have 117 bytes
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_10, FRAME_GET_86_15, FRAME_GET_86_16}));
+  this->reply_(bundle({REPLY_CONTROL_MODE_PP, REPLY_CP_LIMITS, REPLY_CP_SETPOINT}));
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_23, FRAME_GET_86_24}));
+  this->reply_(bundle({REPLY_RADIATOR_AND_UNDERFLOOR_LIMITS, REPLY_RADIATOR_AND_UNDERFLOOR_SETPOINT}));
   ASSERT_TRUE(this->next_request_().empty());
   this->pump_.write_number(NumberSetting::NUMBER_SETTING_CONSTANT_PRESSURE, 3.5f);
   EXPECT_TRUE(this->pump_.status_has_warning());

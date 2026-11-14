@@ -136,10 +136,10 @@ TEST_F(CommandTest, BadAirVentingRepliesAreWarned) {
 TEST_F(CommandTest, WaitingAirVentingIsReplaced) {
   this->read_selects_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
   this->pump_.write_air_venting(true);
   this->pump_.write_air_venting(false);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   EXPECT_EQ(this->next_request_(), FRAME_AIR_VENTING_OFF);
   EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
 }
@@ -158,10 +158,10 @@ TEST_F(CommandTest, AirVentingIsRefusedWithoutConnection) {
 TEST_F(CommandTest, AirVentingNotSentIsWarned) {
   this->read_selects_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
   this->pump_.write_air_venting(true);
   this->bus_.connected = false;
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   EXPECT_TRUE(this->pump_.status_has_warning());
   this->run_();
   EXPECT_FALSE(this->wrote_(FRAME_AIR_VENTING_ON));
@@ -201,7 +201,7 @@ TEST_F(CommandTest, CommandRefreshesTheSettings) {
   this->reply_(REPLY_COMMAND_ACK);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_NORMAL);
-  EXPECT_EQ(this->next_request_(), FRAME_GET_86_10);
+  EXPECT_EQ(this->next_request_(), FRAME_GET_SELECTS);
 }
 
 // The stop command sets the requested operating mode (86/100) as well; its read-back shows Stop
@@ -214,11 +214,9 @@ TEST_F(CommandTest, StopShowsInTheOperatingModeSelect) {
   this->reply_(REPLY_OPERATING_MODE_STOP);
   EXPECT_EQ(this->operating_mode_.active_index(), STOP);
   EXPECT_FALSE(this->pump_.status_has_warning());
-  // Then the refresh
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_STOP);
+  // Then the refresh, in one request
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_STOP}));
   EXPECT_EQ(this->operating_mode_.active_index(), STOP);
 }
 
@@ -235,19 +233,16 @@ TEST_F(CommandTest, CommandWaitsForARunningWrite) {
 TEST_F(CommandTest, CommandBehindAWriteWithoutValidReadWaitsUntilTheWriteIsDropped) {
   this->use_selects_();
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_V2);  // no valid read of 86/10: its write waits
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(
+      bundle({REPLY_CONTROL_MODE_V2, REPLY_OPERATING_MODE_NORMAL}));  // no valid read of 86/10: its write waits
   this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
   this->pump_.send_command(Command::COMMAND_START);
   EXPECT_TRUE(this->next_request_().empty());
   for (uint8_t i = 1; i < WRITE_WAIT_CYCLES; i++) {
     this->pump_.update();
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-    this->reply_(REPLY_CONTROL_MODE_V2);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-    this->reply_(REPLY_OPERATING_MODE_NORMAL);
+    ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+    this->reply_(bundle({REPLY_CONTROL_MODE_V2, REPLY_OPERATING_MODE_NORMAL}));
   }
   this->pump_.update();
   EXPECT_EQ(this->next_request_(), FRAME_COMMAND_6);
@@ -262,10 +257,8 @@ TEST_F(CommandTest, WaitingCommandIsDroppedOnDisconnect) {
   this->bus_.establish_connection();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_FALSE(this->wrote_(FRAME_COMMAND_5));
 }
@@ -281,13 +274,13 @@ TEST_F(CommandTest, DisconnectDuringCommandIsWarned) {
 TEST_F(CommandTest, FullQueueRefusesMore) {
   this->read_selects_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // a poll is on the wire, so the writes wait
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);  // a poll is on the wire, so the writes wait
   this->pump_.write_select(CONTROL_MODE, CONSTANT_CURVE);
   this->pump_.write_select(OPERATING_MODE, MAX);
   this->pump_.send_command(Command::COMMAND_STOP);
   this->pump_.send_command(Command::COMMAND_START);
   this->pump_.send_command(Command::COMMAND_RESET_ALARM);  // the fifth: refused
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
   ASSERT_EQ(this->next_request_(), FRAME_SET_CONTROL_MODE_CURVE);
@@ -295,10 +288,8 @@ TEST_F(CommandTest, FullQueueRefusesMore) {
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
   this->reply_(REPLY_CONTROL_MODE_CURVE);
   // 86/100 is polled again after the control mode write
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_CURVE);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_NORMAL_CURVE);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_CURVE, REPLY_OPERATING_MODE_NORMAL_CURVE}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_NORMAL_CURVE);
   ASSERT_EQ(this->next_request_(), FRAME_SET_OPERATING_MODE_MAX_CURVE);
@@ -315,7 +306,7 @@ TEST_F(CommandTest, FullQueueRefusesMore) {
   this->reply_(REPLY_OPERATING_MODE_NORMAL_CURVE);
   EXPECT_FALSE(this->pump_.status_has_warning());
   // Then the refresh; the refused command never comes
-  EXPECT_EQ(this->next_request_(), FRAME_GET_86_10);
+  EXPECT_EQ(this->next_request_(), FRAME_GET_SELECTS);
   EXPECT_FALSE(this->wrote_(FRAME_COMMAND_2));
 }
 
@@ -323,11 +314,11 @@ TEST_F(CommandTest, FullQueueRefusesMore) {
 TEST_F(CommandTest, StartStopStartEndsStarted) {
   this->read_selects_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // a poll is on the wire, so the commands wait
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);  // a poll is on the wire, so the commands wait
   this->pump_.send_command(Command::COMMAND_START);
   this->pump_.send_command(Command::COMMAND_STOP);
   this->pump_.send_command(Command::COMMAND_START);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   ASSERT_EQ(this->next_request_(), FRAME_COMMAND_5);
   this->reply_(REPLY_COMMAND_ACK);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
@@ -346,20 +337,18 @@ TEST_F(CommandTest, StartStopStartEndsStarted) {
 TEST_F(CommandTest, SelectStopSelectEndsWithTheLastSelect) {
   this->read_selects_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);  // a poll is on the wire, so the writes wait
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);  // a poll is on the wire, so the writes wait
   this->pump_.write_select(OPERATING_MODE, MAX);
   this->pump_.send_command(Command::COMMAND_STOP);
   this->pump_.write_select(OPERATING_MODE, 0);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
   ASSERT_EQ(this->next_request_(), FRAME_COMMAND_5);
   this->reply_(REPLY_COMMAND_ACK);
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_STOP);
   // The command may have changed the settings: the refresh polls them before the write
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-  this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-  this->reply_(REPLY_OPERATING_MODE_STOP);
+  ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+  this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_STOP}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
   this->reply_(REPLY_OPERATING_MODE_STOP);
   ASSERT_EQ(this->next_request_(), FRAME_SET_OPERATING_MODE_NORMAL);

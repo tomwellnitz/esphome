@@ -18,10 +18,75 @@ TEST_F(GrundfosAlphaTest, IdentifiesThenChainsBothObjects) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
+// Both objects go in one request, as recorded on a real ALPHA3, and each APDU of the reply goes to its object
+TEST_F(GrundfosAlphaTest, DecodesTheRecordedReplyOfBothObjects) {
+  EXPECT_EQ(FRAME_PROCESS_MOTOR, FRAME_RECORDED_MEASUREMENTS);
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_RECORDED_MEASUREMENTS);
+  this->reply_(REPLY_RECORDED_MEASUREMENTS);
+  EXPECT_FLOAT_EQ(this->flow_.state, 0.00017030404706019908f * 3600.0f);
+  EXPECT_FLOAT_EQ(this->head_.state, 12077.2412109375f / 9804.0f);
+  EXPECT_FLOAT_EQ(this->medium_temperature_.state, 39.32610321044922f);
+  EXPECT_FLOAT_EQ(this->voltage_.state, 220.60073852539062f);
+  EXPECT_FLOAT_EQ(this->current_.state, 0.03800658881664276f);
+  EXPECT_FLOAT_EQ(this->power_.state, 6.338653564453125f);
+  EXPECT_FLOAT_EQ(this->speed_.state, 2402.9296875f);
+  EXPECT_FALSE(this->pump_.status_has_warning());
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
+// GENIbus replies carry no object IDs: a reply with fewer or more APDUs than asked for is not spread over the objects.
+// After it, the objects go one per request until the next connection, and a single request too checks the count.
+TEST_F(GrundfosAlphaTest, ReplyWithAnotherApduCountGivesNanThenSingleRequests) {
+  this->read_all_();
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS);
+  EXPECT_TRUE(std::isnan(this->flow_.state));
+  EXPECT_TRUE(std::isnan(this->power_.state));
+  EXPECT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  EXPECT_FLOAT_EQ(this->head_.state, 4.0f);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
+  EXPECT_TRUE(std::isnan(this->power_.state));
+  EXPECT_TRUE(this->next_request_().empty());
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
+  this->bus_.lose_connection();
+  this->bus_.establish_connection();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_ALPHA3);
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+}
+
+// Assumed, not recorded: a firmware without an object leaves its APDU out of the reply to several objects. The
+// single requests that follow find the missing object (a real ALPHA3 answers a single GET of one with 0A 01 04).
+TEST_F(GrundfosAlphaTest, ObjectLeftOutOfTheReplyIsFoundBySingleRequests) {
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_TRUE(std::isnan(this->voltage_.state));
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_OBJECT_MISSING);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);
+  EXPECT_FLOAT_EQ(this->voltage_.state, 230.0f);
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_MOTOR);
+}
+
 TEST_F(GrundfosAlphaTest, IdentifiesOnlyOnce) {
   this->read_all_();
   this->pump_.update();
-  EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
 }
 
 TEST_F(GrundfosAlphaTest, ReadsOnlyObjectsWithSensors) {
@@ -73,7 +138,7 @@ TEST_F(GrundfosAlphaTest, ShortIdentityIsRetriedAndWarningClearsOnSuccess) {
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
   EXPECT_FALSE(this->pump_.status_has_warning());
-  EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
 }
 
 TEST_F(GrundfosAlphaTest, ResponseWithoutOpenRequestIsIgnored) {
@@ -93,10 +158,8 @@ TEST_F(GrundfosAlphaTest, UnexpectedVersionIsNotDecoded) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
-  this->reply_(REPLY_PROCESS);
-  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
-  this->reply_(REPLY_MOTOR_V2);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(bundle({REPLY_PROCESS, REPLY_MOTOR_V2}));
   EXPECT_FLOAT_EQ(this->head_.state, 4.0f);
   EXPECT_TRUE(this->power_.has_state());
   EXPECT_TRUE(std::isnan(this->power_.state));
@@ -108,37 +171,35 @@ TEST_F(GrundfosAlphaTest, ZeroMediumTemperatureAfterPowerUpIsUnknown) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
-  this->reply_(REPLY_PROCESS_AFTER_POWER_UP);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(bundle({REPLY_PROCESS_AFTER_POWER_UP, REPLY_MOTOR}));
   EXPECT_TRUE(std::isnan(this->medium_temperature_.state));
   EXPECT_NEAR(this->head_.state, 1400.447f / 9804.0f, 1e-6f);  // the other fields are published
 }
 
-TEST_F(GrundfosAlphaTest, ErrorAckGivesNanAndChainGoesOn) {
+// Assumed, not recorded: an APDU of the reply to several objects reports an error for its object
+TEST_F(GrundfosAlphaTest, ErrorAckGivesNanForItsObjectOnly) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
-  this->reply_(REPLY_PROCESS_ID_UNKNOWN);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(bundle({REPLY_PROCESS_ID_UNKNOWN, REPLY_MOTOR}));
   EXPECT_TRUE(std::isnan(this->flow_.state));
   EXPECT_TRUE(std::isnan(this->head_.state));
-  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
-  this->reply_(REPLY_MOTOR);
   EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
 }
 
+// Assumed, not recorded: an APDU of the reply to several objects says its object is missing
 TEST_F(GrundfosAlphaTest, MissingObjectGivesNanAndIsSkippedUntilReconnect) {
   this->pump_.update();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
-  this->reply_(REPLY_OBJECT_MISSING);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(bundle({REPLY_OBJECT_MISSING, REPLY_MOTOR}));
   EXPECT_TRUE(this->flow_.has_state());
   EXPECT_TRUE(std::isnan(this->flow_.state));
   EXPECT_TRUE(std::isnan(this->head_.state));
   EXPECT_TRUE(std::isnan(this->medium_temperature_.state));
-  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
-  this->reply_(REPLY_MOTOR);
   EXPECT_FLOAT_EQ(this->voltage_.state, 230.0f);
   EXPECT_FALSE(this->pump_.status_has_warning());
   // The next update asks only for the object the pump has
@@ -151,18 +212,25 @@ TEST_F(GrundfosAlphaTest, MissingObjectGivesNanAndIsSkippedUntilReconnect) {
   this->bus_.establish_connection();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
 }
 
-TEST_F(GrundfosAlphaTest, TimeoutGivesNanAndChainGoesOn) {
+TEST_F(GrundfosAlphaTest, TimeoutGivesNanForEveryObjectOfTheRequest) {
   this->read_all_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
   this->run_(TIMEOUT_MS);
   EXPECT_TRUE(std::isnan(this->flow_.state));
+  EXPECT_TRUE(std::isnan(this->power_.state));
+  this->now_ += QUIET_MS;
+  EXPECT_TRUE(this->next_request_().empty());
+  // This firmware may not answer several objects at once
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);
   EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
-  this->now_ += 250;  // quiet period after the timeout
-  EXPECT_EQ(this->next_request_(), FRAME_MOTOR);
 }
 
 TEST_F(GrundfosAlphaTest, SkipsUpdateWhileBusy) {
@@ -194,14 +262,14 @@ TEST_F(GrundfosAlphaTest, DisconnectBetweenPollsGivesNanAtOnce) {
 TEST_F(GrundfosAlphaTest, DisconnectDuringRequestGivesNanAndRecovers) {
   this->read_all_();
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
   this->bus_.lose_connection();
   EXPECT_TRUE(std::isnan(this->flow_.state));
   EXPECT_TRUE(std::isnan(this->power_.state));
   this->bus_.connected = true;
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);  // identity stays known
-  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);  // identity stays known
+  this->reply_(REPLY_PROCESS_MOTOR);
   EXPECT_FLOAT_EQ(this->head_.state, 4.0f);
 }
 
@@ -218,8 +286,8 @@ TEST_F(GrundfosAlphaTest, ReconnectIdentifiesAgainAndReadsAtOnce) {
   this->bus_.establish_connection();
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
-  ASSERT_EQ(this->next_request_(), FRAME_PROCESS);
-  this->reply_(REPLY_PROCESS);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
   EXPECT_FLOAT_EQ(this->head_.state, 4.0f);
 }
 
@@ -236,7 +304,7 @@ TEST_F(GrundfosAlphaTest, UnsupportedModelIsIdentifiedAgainAfterReconnect) {
   ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
   this->reply_(REPLY_IDENTITY_ALPHA3);
   EXPECT_FALSE(this->pump_.status_has_warning());
-  EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
 }
 
 }  // namespace esphome::grundfos_alpha::testing

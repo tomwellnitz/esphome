@@ -380,6 +380,27 @@ TEST_F(ClockTest, CheckFollowsTheFirstPollAndThePollGoesOn) {
   EXPECT_EQ(this->next_request_(), FRAME_PROCESS);
 }
 
+// The poll after the check asks for several objects in one request and decodes their reply
+TEST_F(ClockTest, BundledPollFollowsTheCheck) {
+  sensor::Sensor flow, power;
+  this->pump_.set_flow_sensor(&flow);
+  this->pump_.set_power_sensor(&power);
+  this->clock_.now = TIME_20_49_31;
+  this->identify_();
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_GET_94_101);
+  this->reply_(REPLY_ACTUAL_20_49_31);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+  this->reply_(REPLY_PROCESS_MOTOR);
+  EXPECT_FLOAT_EQ(power.state, 19.5f);
+  EXPECT_TRUE(this->next_request_().empty());
+  // The next update polls without a check
+  this->pump_.update();
+  EXPECT_EQ(this->next_request_(), FRAME_PROCESS_MOTOR);
+}
+
 // Without set_clock the clock is only compared, never written
 TEST_F(ClockTest, OnlyChecksWithoutSetClock) {
   this->pump_.set_clock_writes(false);

@@ -188,10 +188,8 @@ TEST_F(SwitchTest, PollsBothObjectsInOrder) {
   this->pump_.set_pump_kick_switch(&this->pump_kick_);
   this->pump_.set_clock_program_switch(&this->clock_program_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_2);
-  this->reply_(REPLY_PUMP_KICK_ON_25H_120S);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_84_1);
-  this->reply_(REPLY_CLOCK_PROGRAM_ON);
+  ASSERT_EQ(this->next_request_(), bundle({FRAME_GET_86_2, FRAME_GET_84_1}));
+  this->reply_(bundle({REPLY_PUMP_KICK_ON_25H_120S, REPLY_CLOCK_PROGRAM_ON}));
   EXPECT_TRUE(this->next_request_().empty());
   EXPECT_TRUE(this->pump_kick_.state);
   EXPECT_TRUE(this->clock_program_.state);
@@ -331,15 +329,14 @@ TEST_F(SwitchTest, BothSwitchesQueueTheirWrites) {
   this->pump_.set_pump_kick_switch(&this->pump_kick_);
   this->pump_.set_clock_program_switch(&this->clock_program_);
   this->identify_();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_2);
-  this->reply_(REPLY_PUMP_KICK_ON_25H_60S);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_84_1);
-  this->reply_(REPLY_CLOCK_PROGRAM_OFF);
+  const Bytes poll = bundle({FRAME_GET_86_2, FRAME_GET_84_1});
+  ASSERT_EQ(this->next_request_(), poll);
+  this->reply_(bundle({REPLY_PUMP_KICK_ON_25H_60S, REPLY_CLOCK_PROGRAM_OFF}));
   this->pump_.update();
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_2);  // a poll is on the wire, so both writes wait
+  ASSERT_EQ(this->next_request_(), poll);  // a poll is on the wire, so both writes wait
   this->pump_.write_pump_kick(false);
   this->pump_.write_clock_program(true);
-  this->reply_(REPLY_PUMP_KICK_ON_25H_60S);
+  this->reply_(bundle({REPLY_PUMP_KICK_ON_25H_60S, REPLY_CLOCK_PROGRAM_OFF}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_2);
   this->reply_(REPLY_PUMP_KICK_ON_25H_60S);
   ASSERT_EQ(this->next_request_(), FRAME_SET_PUMP_KICK_OFF_25H_60S);
@@ -347,10 +344,8 @@ TEST_F(SwitchTest, BothSwitchesQueueTheirWrites) {
   ASSERT_EQ(this->next_request_(), FRAME_GET_86_2);
   this->reply_(REPLY_PUMP_KICK_OFF_25H_60S);
   // A write can change other objects: the clock program waits until the poll has read 84/1 again
-  ASSERT_EQ(this->next_request_(), FRAME_GET_86_2);
-  this->reply_(REPLY_PUMP_KICK_OFF_25H_60S);
-  ASSERT_EQ(this->next_request_(), FRAME_GET_84_1);
-  this->reply_(REPLY_CLOCK_PROGRAM_OFF);
+  ASSERT_EQ(this->next_request_(), poll);
+  this->reply_(bundle({REPLY_PUMP_KICK_OFF_25H_60S, REPLY_CLOCK_PROGRAM_OFF}));
   ASSERT_EQ(this->next_request_(), FRAME_GET_84_1);
   this->reply_(REPLY_CLOCK_PROGRAM_OFF);
   ASSERT_EQ(this->next_request_(), FRAME_SET_CLOCK_PROGRAM_ON);

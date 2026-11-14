@@ -3,6 +3,7 @@
 #include "../common.h"
 
 #include "esphome/components/select/select.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 
 namespace esphome::grundfos_alpha::testing {
 
@@ -36,10 +37,8 @@ class SelectTest : public PumpTest {
   void read_selects_() {
     this->use_selects_();
     this->identify_();
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-    this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_100);
-    this->reply_(REPLY_OPERATING_MODE_NORMAL);
+    ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+    this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
     ASSERT_TRUE(this->next_request_().empty());
   }
 
@@ -58,9 +57,27 @@ class SelectTest : public PumpTest {
     this->reply_(reply);
     EXPECT_TRUE(this->pump_.status_has_warning());
     EXPECT_EQ(this->control_mode_.active_index(), UNDERFLOOR);
-    ASSERT_EQ(this->next_request_(), FRAME_GET_86_10);
-    this->reply_(REPLY_CONTROL_MODE_UNDERFLOOR);
-    EXPECT_EQ(this->next_request_(), FRAME_GET_86_100);
+    ASSERT_EQ(this->next_request_(), FRAME_GET_SELECTS);
+    this->reply_(bundle({REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
+    EXPECT_TRUE(this->next_request_().empty());
+  }
+
+  // Add flow and power sensors and the text sensor of the mode in effect: the poll needs two requests, the first with
+  // 93/289, 87/69, 86/10 and 86/100 (FRAME_POLL), the second with 86/8
+  void use_all_() {
+    this->pump_.set_flow_sensor(&this->flow_);
+    this->pump_.set_power_sensor(&this->power_);
+    this->pump_.set_operating_mode_text_sensor(&this->in_effect_);
+    this->use_selects_();
+  }
+
+  // Answer both requests of use_all_(): underfloor heating, normal
+  void read_all_() {
+    ASSERT_EQ(this->next_request_(), FRAME_POLL);
+    this->reply_(bundle({REPLY_PROCESS, REPLY_MOTOR, REPLY_CONTROL_MODE_UNDERFLOOR, REPLY_OPERATING_MODE_NORMAL}));
+    ASSERT_EQ(this->next_request_(), FRAME_GET_86_8);
+    this->reply_(REPLY_REALIZED);
+    ASSERT_TRUE(this->next_request_().empty());
   }
 
   bool wrote_(const Bytes &frame) const {
@@ -68,6 +85,8 @@ class SelectTest : public PumpTest {
   }
 
   TestSelect control_mode_, operating_mode_;
+  sensor::Sensor flow_, power_;
+  text_sensor::TextSensor in_effect_;
 };
 
 }  // namespace esphome::grundfos_alpha::testing
