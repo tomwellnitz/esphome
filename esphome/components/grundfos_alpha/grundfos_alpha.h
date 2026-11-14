@@ -30,13 +30,11 @@ enum class Reading : uint8_t {
   READING_SPEED,
 };
 
-/// A big-endian float at offset in the body of an object, multiplied by factor before it is published. With
-/// zero_is_unknown, exactly 0 is published as unknown: the pump sends it while it has no value yet.
+/// A big-endian float at offset in the body of an object, multiplied by factor before it is published.
 struct Field {
   Reading reading;
   uint8_t offset;
   float factor;
-  bool zero_is_unknown{false};
 };
 
 /// A class 10 object as one model sends it. A reply of another type, version or size is not decoded.
