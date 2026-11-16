@@ -18,6 +18,39 @@ TEST_F(GrundfosAlphaTest, IdentifiesThenChainsBothObjects) {
   EXPECT_TRUE(this->next_request_().empty());
 }
 
+TEST_F(GrundfosAlphaTest, ReadsAnAlpha2GoWithItsOwnObjects) {
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_ALPHA2_GO);
+  this->reply_(REPLY_PROCESS_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_MEDIA_TEMPERATURE_ALPHA2_GO);
+  this->reply_(REPLY_MEDIA_TEMPERATURE_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR_ALPHA2_GO);
+  EXPECT_FLOAT_EQ(this->flow_.state, 0.5f);
+  EXPECT_NEAR(this->head_.state, 11765.0f / 9804.0f, 1e-5f);
+  EXPECT_FLOAT_EQ(this->medium_temperature_.state, 41.5f);
+  EXPECT_FLOAT_EQ(this->voltage_.state, 230.0f);
+  EXPECT_FLOAT_EQ(this->current_.state, 0.0625f);
+  EXPECT_FLOAT_EQ(this->power_.state, 6.25f);
+  EXPECT_FLOAT_EQ(this->speed_.state, 2400.0f);
+  EXPECT_TRUE(this->next_request_().empty());
+}
+
+TEST_F(GrundfosAlphaTest, Alpha2GoDoesNotTakeTheAlpha3MotorVersion) {
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_ALPHA2_GO);
+  this->reply_(REPLY_PROCESS_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_MEDIA_TEMPERATURE_ALPHA2_GO);
+  this->reply_(REPLY_MEDIA_TEMPERATURE_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR);  // version 1 from an ALPHA3
+  EXPECT_TRUE(std::isnan(this->power_.state));
+}
+
 TEST_F(GrundfosAlphaTest, IdentifiesOnlyOnce) {
   this->read_all_();
   this->pump_.update();
