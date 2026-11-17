@@ -30,13 +30,15 @@ struct Field {
   float factor;
 };
 
-/// A class 10 object as one model sends it. A reply of another type, version or size is not decoded.
+/// A class 10 object as one model sends it. Versions from version to max_version must keep the offsets of the fields;
+/// a reply of another type or version, or shorter than size, is not decoded.
 struct ObjectLayout {
   uint8_t object;
   uint16_t sub_id;
   uint16_t type;
   uint8_t version;
-  uint8_t size;
+  uint8_t max_version;
+  uint8_t size;  // the smallest body of the accepted versions
   std::span<const Field> fields;
 };
 

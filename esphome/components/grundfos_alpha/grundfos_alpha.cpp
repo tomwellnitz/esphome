@@ -44,8 +44,8 @@ static constexpr Field ALPHA3_MOTOR_FIELDS[] = {
     {Reading::READING_SPEED, 20, 1.0f},
 };
 static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
-    {93, 289, 0x0130, 1, 24, ALPHA3_PROCESS_FIELDS},
-    {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},
+    {93, 289, 0x0130, 1, 1, 24, ALPHA3_PROCESS_FIELDS},
+    {87, 69, 0x0100, 1, 1, 37, ALPHA3_MOTOR_FIELDS},
 };
 
 // ALPHA2 GO (52/6/0), from the data model of the Grundfos GO app for 52/6, checked against the replies of a real
@@ -55,15 +55,17 @@ static constexpr Field ALPHA2_GO_PROCESS_FIELDS[] = {
     {Reading::READING_FLOW, 0, SECONDS_PER_HOUR},
     {Reading::READING_HEAD, 4, 1.0f / PASCAL_PER_METER},
 };
-// 93/300, type 0x0216 v2 (13 bytes): media_temperature (°C), two more floats and a byte
+// 93/300, type 0x0216 v1 (12 bytes): media_temperature (°C), pcb_temperature, controlbox_temperature; v2 (13 bytes,
+// sent by a real ALPHA2 GO 15-60) adds a byte
 static constexpr Field ALPHA2_GO_MEDIA_FIELDS[] = {
     {Reading::READING_MEDIUM_TEMPERATURE, 0, 1.0f},
 };
-// 87/69 v3 (41 bytes) keeps the offsets of v1
+// 87/69 v2 (in the GO app data model for 52/6) and v3 (sent by a real ALPHA2 GO 15-60), both 41 bytes, keep the
+// offsets of v1
 static constexpr ObjectLayout ALPHA2_GO_OBJECTS[] = {
-    {93, 290, 0x0235, 2, 36, ALPHA2_GO_PROCESS_FIELDS},
-    {93, 300, 0x0216, 2, 13, ALPHA2_GO_MEDIA_FIELDS},
-    {87, 69, 0x0100, 3, 41, ALPHA3_MOTOR_FIELDS},
+    {93, 290, 0x0235, 2, 2, 36, ALPHA2_GO_PROCESS_FIELDS},
+    {93, 300, 0x0216, 1, 2, 12, ALPHA2_GO_MEDIA_FIELDS},
+    {87, 69, 0x0100, 2, 3, 41, ALPHA3_MOTOR_FIELDS},
 };
 
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B", "ALPHA2 GO");
@@ -173,8 +175,8 @@ void GrundfosAlpha::decode_(uint8_t index, const genibus::GenibusResponse &respo
   genibus::DataObject object{};
   const bool replied = response.error == GenibusError::GENIBUS_ERROR_NONE && reader.next(apdu);
   const bool parsed = replied && genibus::parse_data_object(apdu, object);
-  const bool ok =
-      parsed && object.type == layout.type && object.version == layout.version && object.body.size() == layout.size;
+  const bool ok = parsed && object.type == layout.type && object.version >= layout.version &&
+                  object.version <= layout.max_version && object.body.size() >= layout.size;
   if (replied && genibus::is_object_missing(apdu)) {
     // A firmware without the object: skip it until the next connection instead of asking at every update
     this->missing_ |= 1u << index;

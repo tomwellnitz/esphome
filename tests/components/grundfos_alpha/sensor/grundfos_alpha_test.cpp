@@ -51,6 +51,22 @@ TEST_F(GrundfosAlphaTest, Alpha2GoDoesNotTakeTheAlpha3MotorVersion) {
   EXPECT_TRUE(std::isnan(this->power_.state));
 }
 
+TEST_F(GrundfosAlphaTest, Alpha2GoReadsTheOlderVersionsWithTheSameOffsets) {
+  this->pump_.update();
+  ASSERT_EQ(this->next_request_(), FRAME_IDENTITY);
+  this->reply_(REPLY_IDENTITY_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_PROCESS_ALPHA2_GO);
+  this->reply_(REPLY_PROCESS_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_MEDIA_TEMPERATURE_ALPHA2_GO);
+  this->reply_(REPLY_MEDIA_TEMPERATURE_V1_ALPHA2_GO);
+  ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
+  this->reply_(REPLY_MOTOR_V2);
+  EXPECT_FLOAT_EQ(this->medium_temperature_.state, 41.5f);
+  EXPECT_FLOAT_EQ(this->voltage_.state, 230.0f);
+  EXPECT_FLOAT_EQ(this->power_.state, 19.5f);
+  EXPECT_FLOAT_EQ(this->speed_.state, 3000.0f);
+}
+
 TEST_F(GrundfosAlphaTest, IdentifiesOnlyOnce) {
   this->read_all_();
   this->pump_.update();
