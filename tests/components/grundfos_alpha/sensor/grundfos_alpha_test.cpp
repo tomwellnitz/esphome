@@ -28,13 +28,13 @@ TEST_F(GrundfosAlphaTest, ReadsAnAlpha2GoWithItsOwnObjects) {
   this->reply_(REPLY_MEDIA_TEMPERATURE_ALPHA2_GO);
   ASSERT_EQ(this->next_request_(), FRAME_MOTOR);
   this->reply_(REPLY_MOTOR_ALPHA2_GO);
-  EXPECT_FLOAT_EQ(this->flow_.state, 0.5f);
-  EXPECT_NEAR(this->head_.state, 11765.0f / 9804.0f, 1e-5f);
-  EXPECT_FLOAT_EQ(this->medium_temperature_.state, 41.5f);
-  EXPECT_FLOAT_EQ(this->voltage_.state, 230.0f);
-  EXPECT_FLOAT_EQ(this->current_.state, 0.0625f);
-  EXPECT_FLOAT_EQ(this->power_.state, 6.25f);
-  EXPECT_FLOAT_EQ(this->speed_.state, 2400.0f);
+  EXPECT_NEAR(this->flow_.state, 0.9748f, 1e-3f);
+  EXPECT_NEAR(this->head_.state, 5.1144f, 1e-3f);
+  EXPECT_NEAR(this->medium_temperature_.state, 37.47f, 1e-2f);
+  EXPECT_NEAR(this->voltage_.state, 230.65f, 1e-2f);
+  EXPECT_NEAR(this->current_.state, 0.2126f, 1e-4f);
+  EXPECT_NEAR(this->power_.state, 36.86f, 1e-2f);
+  EXPECT_NEAR(this->speed_.state, 4838.6f, 1e-1f);
   EXPECT_TRUE(this->next_request_().empty());
 }
 

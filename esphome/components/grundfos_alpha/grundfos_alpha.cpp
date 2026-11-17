@@ -48,22 +48,22 @@ static constexpr ObjectLayout ALPHA3_OBJECTS[] = {
     {87, 69, 0x0100, 1, 37, ALPHA3_MOTOR_FIELDS},
 };
 
-// ALPHA2 GO (52/6/0), from the data model of the Grundfos GO app for 52/6 and the GO app traffic of a real ALPHA2 GO
-// 15-60. 93/290, type 0x0235 v2: the 93/289 fields, then flow (m³/h), head (m) and Kv; both temperatures are NaN on a
-// 15-60, so the medium temperature comes from 93/300.
+// ALPHA2 GO (52/6/0), from the data model of the Grundfos GO app for 52/6, checked against the replies of a real
+// ALPHA2 GO 15-60. 93/290, type 0x0235 v2: the 93/289 fields, then flow (m³/h), head (m) and Kv; both temperatures are
+// NaN on a 15-60, so the medium temperature comes from 93/300.
 static constexpr Field ALPHA2_GO_PROCESS_FIELDS[] = {
     {Reading::READING_FLOW, 0, SECONDS_PER_HOUR},
     {Reading::READING_HEAD, 4, 1.0f / PASCAL_PER_METER},
 };
-// 93/300, type 0x0216 v1: media_temperature (°C), pcb_temperature, controlbox_temperature
+// 93/300, type 0x0216 v2 (13 bytes): media_temperature (°C), two more floats and a byte
 static constexpr Field ALPHA2_GO_MEDIA_FIELDS[] = {
     {Reading::READING_MEDIUM_TEMPERATURE, 0, 1.0f},
 };
-// 87/69 v2 adds a reserved float to v1 and keeps its offsets
+// 87/69 v3 (41 bytes) keeps the offsets of v1
 static constexpr ObjectLayout ALPHA2_GO_OBJECTS[] = {
     {93, 290, 0x0235, 2, 36, ALPHA2_GO_PROCESS_FIELDS},
-    {93, 300, 0x0216, 1, 12, ALPHA2_GO_MEDIA_FIELDS},
-    {87, 69, 0x0100, 2, 41, ALPHA3_MOTOR_FIELDS},
+    {93, 300, 0x0216, 2, 13, ALPHA2_GO_MEDIA_FIELDS},
+    {87, 69, 0x0100, 3, 41, ALPHA3_MOTOR_FIELDS},
 };
 
 PROGMEM_STRING_TABLE(ModelNames, "ALPHA3 Model B", "ALPHA2 GO");
